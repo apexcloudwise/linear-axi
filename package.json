@@ -1,0 +1,61 @@
+{
+  "name": "@apexcloudwise/linear-axi",
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.1.1",
+  "description": "AXI-compliant Linear CLI — token-efficient TOON output, contextual suggestions, idempotent mutations over the Linear GraphQL API",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apexcloudwise/linear-axi.git"
+  },
+  "keywords": [
+    "linear",
+    "linear.app",
+    "cli",
+    "agent",
+    "axi",
+    "toon",
+    "issues"
+  ],
+  "bin": {
+    "linear-axi": "./dist/bin/linear-axi.js"
+  },
+  "files": [
+    "dist",
+    "skills/linear-axi",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:skill": "tsx scripts/build-skill.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx bin/linear-axi.ts",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "prepublishOnly": "npm run build"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@toon-format/toon": "^2.1.0",
+    "axi-sdk-js": "^0.1.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.0.0",
+    "eslint": "^10.1.0",
+    "globals": "^17.4.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.58.0",
+    "vitest": "^3.0.0"
+  }
+}
