@@ -30,7 +30,12 @@ describe('mapLinearError', () => {
     const err = mapLinearError({
       status: 200,
       body: {
-        errors: [{ message: 'x', extensions: { userError: 'Title is required' } }],
+        errors: [
+          {
+            message: 'Title is required',
+            extensions: { userError: true },
+          },
+        ],
       },
     });
     expect(err.code).toBe('VALIDATION_ERROR');

@@ -1,5 +1,5 @@
 import type { LinearContext } from '../context.js';
-import { requireKey, parseIssueRef } from '../config.js';
+import { requireKey } from '../config.js';
 import { fetchIssue, createComment } from '../linear.js';
 import { assertKnownFlags, takeFlag, getPositional } from '../args.js';
 import { AxiError } from '../errors.js';
@@ -51,8 +51,7 @@ export async function commentCommand(
 
   const text = body ?? readBodyFile(bodyFile!);
 
-  const ref = parseIssueRef(refRaw);
-  const issue = await fetchIssue(apiKey, ref);
+  const issue = await fetchIssue(apiKey, refRaw);
   if (!issue) {
     throw new AxiError(`Issue "${refRaw}" not found`, 'NOT_FOUND');
   }

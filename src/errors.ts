@@ -17,7 +17,7 @@ export interface LinearGraphQLError {
   path?: Array<string | number>;
   extensions?: {
     code?: string;
-    userError?: string | null;
+    userError?: boolean | string | null;
     [key: string]: unknown;
   };
 }
@@ -72,20 +72,30 @@ export function mapLinearError(result: LinearQueryResult): AxiError {
   // 200 with GraphQL errors, or a 4xx we did not special-case above.
   if (gqlErrors.length > 0) {
     const first = gqlErrors[0];
-    const msg = first.extensions?.userError || first.message;
-    const text = `${msg}`;
+    // `extensions.userError` is a boolean flag on Linear errors, NOT the
+    // message — use `message` as the human-readable text.
+    const message = first.message;
+    const path = first.path?.length ? ` (at ${first.path.join('.')})` : '';
+    const code = first.extensions?.code ? ` [${first.extensions.code}]` : '';
+    const text = `${message}${path}${code}`;
 
-    if (/not found|entity not found/i.test(text)) {
+    if (/not found|entity not found/i.test(message)) {
       return new AxiError(text, 'NOT_FOUND');
     }
-    if (/auth|unauthor/i.test(text)) {
+    if (/auth|unauthor/i.test(message)) {
       return new AxiError(text, 'AUTH_REQUIRED');
     }
-    if (/validation|invalid|required|already/i.test(text)) {
+    if (/validation|invalid|required|already/i.test(message)) {
       return new AxiError(text, 'VALIDATION_ERROR');
     }
 
-    return new AxiError(text, 'UNKNOWN');
+    // Surface the full extensions as a hint so query-shape errors (e.g. an
+    // invalid field or filter) are debuggable in one round trip.
+    const extHint =
+      first.extensions && Object.keys(first.extensions).length > 0
+        ? `extensions: ${JSON.stringify(first.extensions)}`
+        : undefined;
+    return new AxiError(text, 'UNKNOWN', extHint ? [extHint] : []);
   }
 
   if (status === 404) {
@@ -123,5 +133,6 @@ function readGraphQLErrors(body: unknown): LinearGraphQLError[] {
 }
 
 function firstMessage(errors: LinearGraphQLError[]): string {
-  return errors[0]?.extensions?.userError || errors[0]?.message || '';
+  // `extensions.userError` is a boolean flag, not the text — use `message`.
+  return errors[0]?.message || '';
 }

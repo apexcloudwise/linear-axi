@@ -4,8 +4,11 @@ export const LINEAR_API_URL = 'https://api.linear.app/graphql';
 
 /**
  * Raw transport: POST a GraphQL document to Linear with the API key as the
- * Authorization header. Returns the parsed JSON body on 2xx; throws an AxiError
+ * Authorization header. Returns the parsed `data` on success; throws an AxiError
  * (translated from HTTP/GraphQL status) otherwise.
+ *
+ * Set LINEAR_AXI_DEBUG=1 to dump the raw response body to stderr on error,
+ * which makes query-shape mistakes debuggable in one round trip.
  */
 export async function linearRequest<T = unknown>(
   apiKey: string,
@@ -33,12 +36,15 @@ export async function linearRequest<T = unknown>(
     body = null;
   }
 
-  if (!response.ok) {
-    throw mapLinearError({ status: response.status, body });
-  }
+  const withErrors = body as { errors?: unknown } | null;
+  const hasGqlErrors = withErrors && Array.isArray(withErrors.errors);
 
-  const withErrors = body as { errors?: unknown };
-  if (withErrors && Array.isArray(withErrors.errors)) {
+  if (!response.ok || hasGqlErrors) {
+    if (process.env['LINEAR_AXI_DEBUG'] === '1') {
+      console.error('[linear-axi] query:', query);
+      console.error('[linear-axi] variables:', JSON.stringify(variables));
+      console.error('[linear-axi] raw body:', JSON.stringify(body));
+    }
     throw mapLinearError({ status: response.status, body });
   }
 
@@ -46,7 +52,7 @@ export async function linearRequest<T = unknown>(
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL fragments — kept as plain strings so they can be composed by callers.
+// GraphQL fragments — plain strings so callers can compose them.
 // ---------------------------------------------------------------------------
 
 export const ISSUE_LIST_FIELDS = `
@@ -57,6 +63,7 @@ export const ISSUE_LIST_FIELDS = `
   priority
   assignee { name }
   team { key }
+  updatedAt
 `;
 
 export const ISSUE_DETAIL_FIELDS = `
@@ -67,12 +74,11 @@ export const ISSUE_DETAIL_FIELDS = `
   state { name type }
   priority
   assignee { name }
-  team { key name }
+  team { key name id }
   labels { nodes { name } }
   url
   createdAt
   updatedAt
-  cycle { id name }
 `;
 
 export interface LinearIssue {
@@ -83,19 +89,17 @@ export interface LinearIssue {
   state?: { name: string; type: string } | null;
   priority?: number;
   assignee?: { name: string } | null;
-  team?: { key: string; name?: string } | null;
+  team?: { id?: string; key: string; name?: string } | null;
   labels?: { nodes: Array<{ name: string }> } | null;
   url?: string;
   createdAt?: string;
   updatedAt?: string;
-  cycle?: { id: string; name: string } | null;
 }
 
 export interface LinearTeam {
   id: string;
   key: string;
   name: string;
-  states?: { nodes: Array<{ id: string; name: string; type: string }> } | null;
 }
 
 export interface LinearViewer {
@@ -126,40 +130,27 @@ export async function fetchTeams(apiKey: string): Promise<LinearTeam[]> {
 
 export interface IssueListFilter {
   team?: string; // team key, e.g. "LIN"
-  stateType?: string; // unstarted | started | completed | canceled | triage | backlog
-  assigneeIsMe?: boolean;
-  assigneeName?: string;
-  label?: string;
-}
-
-/**
- * Resolve a team key (e.g. "LIN") into a team UUID. Returns undefined when no
- * match exists (the caller decides whether that is an error).
- */
-export async function resolveTeamId(
-  apiKey: string,
-  teamKey: string,
-): Promise<string | undefined> {
-  const data = await linearRequest<{
-    teams: { nodes: Array<{ id: string; key: string }> };
-  }>(
-    apiKey,
-    `query TeamByKey($key: String!) {
-      teams(filter: { key: { eq: $key } }) { nodes { id key } }
-    }`,
-    { key: teamKey.toUpperCase() },
-  );
-  return data.teams.nodes[0]?.id;
+  stateType?: string; // backlog | unstarted | started | completed | canceled | triage
+  assigneeEmail?: string; // exact email (use viewer email for "me")
+  assigneeName?: string; // exact display name
+  label?: string; // label name (at least one match)
 }
 
 export interface IssueListResult {
   issues: LinearIssue[];
-  totalCount: number;
 }
 
 /**
- * List issues with an optional filter set. Uses Linear's `issues` connection
- * with nested comparators. `limit` caps `first:` (Linear caps at 50/page).
+ * List issues with an optional filter, most recently updated first.
+ *
+ * Filter syntax follows Linear's documented comparators, e.g.
+ *   assignee: { email: { eq: "x" } }
+ *   labels:   { name:  { eq: "Bug" } }
+ *   state:    { type:  { eq: "started" } }
+ *   team:     { key:   { eq: "LIN" } }
+ *
+ * There is no `totalCount` on Linear connections, so callers compute the count
+ * line from the returned slice (with a truncation hint when `limit` is hit).
  */
 export async function fetchIssues(
   apiKey: string,
@@ -168,8 +159,8 @@ export async function fetchIssues(
 ): Promise<IssueListResult> {
   const where: string[] = [];
 
-  if (filter.assigneeIsMe) {
-    where.push('assignee: { isMe: { eq: true } }');
+  if (filter.assigneeEmail) {
+    where.push(`assignee: { email: { eq: ${jsonStr(filter.assigneeEmail)} } }`);
   }
   if (filter.assigneeName) {
     where.push(`assignee: { name: { eq: ${jsonStr(filter.assigneeName)} } }`);
@@ -181,66 +172,39 @@ export async function fetchIssues(
     where.push(`state: { type: { eq: ${jsonStr(filter.stateType)} } }`);
   }
   if (filter.label) {
-    where.push(
-      `labels: { some: { name: { eq: ${jsonStr(filter.label)} } } }`,
-    );
+    where.push(`labels: { name: { eq: ${jsonStr(filter.label)} } }`);
   }
 
   const filterPart = where.length ? `filter: { ${where.join(', ')} }, ` : '';
   const query = `query Issues($first: Int!) {
     issues(${filterPart}first: $first, orderBy: updatedAt) {
       nodes { ${ISSUE_LIST_FIELDS} }
-      totalCount
     }
   }`;
 
-  const data = await linearRequest<{
-    issues: { nodes: LinearIssue[]; totalCount: number };
-  }>(apiKey, query, { first: Math.min(limit, 50) });
+  const data = await linearRequest<{ issues: { nodes: LinearIssue[] } }>(
+    apiKey,
+    query,
+    { first: Math.min(limit, 50) },
+  );
 
-  return { issues: data.issues.nodes, totalCount: data.issues.totalCount };
+  return { issues: data.issues.nodes };
 }
 
 /**
- * Fetch a single issue. Accepts a UUID directly, or resolves an identifier
- * ("LIN-123") to its UUID via the issues filter before fetching detail.
+ * Fetch a single issue. Linear's `issue(id:)` accepts EITHER a UUID or the
+ * human-readable identifier (e.g. "CTZ-311"), so no resolution step is needed.
  */
 export async function fetchIssue(
   apiKey: string,
-  ref: { kind: 'uuid'; id: string } | { kind: 'identifier'; team: string; number: number },
+  ref: string,
 ): Promise<LinearIssue | undefined> {
-  if (ref.kind === 'uuid') {
-    const data = await linearRequest<{ issue: LinearIssue | null }>(
-      apiKey,
-      `query Issue($id: ID!) { issue(id: $id) { ${ISSUE_DETAIL_FIELDS} } }`,
-      { id: ref.id },
-    );
-    return data.issue ?? undefined;
-  }
-
-  // Identifier → resolve to id via the issues connection.
-  const data = await linearRequest<{
-    issues: { nodes: LinearIssue[] };
-  }>(
-    apiKey,
-    `query IssueByIdentifier($teamKey: String!, $number: Int!) {
-      issues(
-        filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } },
-        first: 1
-      ) { nodes { id } }
-    }`,
-    { teamKey: ref.team, number: ref.number },
-  );
-
-  const id = data.issues.nodes[0]?.id;
-  if (!id) return undefined;
-
-  const detail = await linearRequest<{ issue: LinearIssue | null }>(
+  const data = await linearRequest<{ issue: LinearIssue | null }>(
     apiKey,
     `query Issue($id: ID!) { issue(id: $id) { ${ISSUE_DETAIL_FIELDS} } }`,
-    { id },
+    { id: ref },
   );
-  return detail.issue ?? undefined;
+  return data.issue ?? undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +231,6 @@ export async function createIssue(
     );
   }
 
-  // Resolve label ids by name (best-effort, ignore unknowns).
   const labelIds = input.labelNames?.length
     ? await resolveLabelIds(apiKey, input.labelNames)
     : [];
@@ -308,15 +271,19 @@ export interface IssueUpdate {
   priority?: number;
 }
 
+/**
+ * Update an issue. `id` accepts a UUID or identifier (Linear resolves both).
+ * If `stateName` is given, it is resolved to a workflow state id via the
+ * issue's team states.
+ */
 export async function updateIssue(
   apiKey: string,
   id: string,
   update: IssueUpdate,
 ): Promise<LinearIssue> {
-  // Resolve a human state name (e.g. "In Progress") to a workflow state id.
   let stateId: string | undefined;
   if (update.stateName) {
-    stateId = await resolveStateId(apiKey, id, update.stateName);
+    stateId = await resolveStateIdByName(apiKey, id, update.stateName);
   }
 
   const data = await linearRequest<{
@@ -389,6 +356,22 @@ export async function createComment(
 // Resolution helpers
 // ---------------------------------------------------------------------------
 
+export async function resolveTeamId(
+  apiKey: string,
+  teamKey: string,
+): Promise<string | undefined> {
+  const data = await linearRequest<{
+    teams: { nodes: Array<{ id: string; key: string }> };
+  }>(
+    apiKey,
+    `query TeamByKey($key: String!) {
+      teams(filter: { key: { eq: $key } }) { nodes { id key } }
+    }`,
+    { key: teamKey.toUpperCase() },
+  );
+  return data.teams.nodes[0]?.id;
+}
+
 async function resolveLabelIds(
   apiKey: string,
   names: string[],
@@ -396,27 +379,19 @@ async function resolveLabelIds(
   const wanted = names.map((n) => n.trim().toLowerCase());
   const data = await linearRequest<{
     issueLabels: { nodes: Array<{ id: string; name: string }> };
-  }>(
-    apiKey,
-    `query Labels { issueLabels { nodes { id name } } }`,
-  );
+  }>(apiKey, `query Labels { issueLabels { nodes { id name } } }`);
   return data.issueLabels.nodes
     .filter((l) => wanted.includes(l.name.toLowerCase()))
     .map((l) => l.id);
 }
 
-async function resolveStateId(
+async function resolveStateIdByName(
   apiKey: string,
-  issueId: string,
+  issueRef: string,
   stateName: string,
 ): Promise<string> {
-  // Find the issue's team, then that team's workflow states.
-  const issue = await linearRequest<{ issue: { team: { id: string } } | null }>(
-    apiKey,
-    `query IssueTeam($id: ID!) { issue(id: $id) { team { id } } }`,
-    { id: issueId },
-  );
-  const teamId = issue.issue?.team?.id;
+  const issue = await fetchIssue(apiKey, issueRef);
+  const teamId = issue?.team?.id;
   if (!teamId) throw new AxiError('Could not resolve team for issue', 'UNKNOWN');
 
   const data = await linearRequest<{

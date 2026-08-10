@@ -1,5 +1,5 @@
 import type { LinearContext } from '../context.js';
-import { requireKey, parseIssueRef } from '../config.js';
+import { requireKey } from '../config.js';
 import {
   fetchIssue,
   createIssue,
@@ -105,8 +105,7 @@ async function viewIssue(
     ]);
   }
 
-  const ref = parseIssueRef(refRaw);
-  const issue = await fetchIssue(apiKey, ref);
+  const issue = await fetchIssue(apiKey, refRaw);
   if (!issue) {
     throw new AxiError(
       `Issue "${refRaw}" not found`,
@@ -222,8 +221,7 @@ async function updateIssueCmd(
     priority = parsePriority(priorityRaw);
   }
 
-  const ref = parseIssueRef(refRaw);
-  const existing = await fetchIssue(apiKey, ref);
+  const existing = await fetchIssue(apiKey, refRaw);
   if (!existing) {
     throw new AxiError(`Issue "${refRaw}" not found`, 'NOT_FOUND');
   }
@@ -272,8 +270,7 @@ async function deleteIssueCmd(
     ]);
   }
 
-  const ref = parseIssueRef(refRaw);
-  const existing = await fetchIssue(apiKey, ref);
+  const existing = await fetchIssue(apiKey, refRaw);
   if (!existing) {
     // Idempotent: already gone.
     return renderOutput([`issue: "${refRaw}" not found (no-op)`]);

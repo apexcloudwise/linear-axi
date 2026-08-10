@@ -1,6 +1,6 @@
 import type { LinearContext } from '../context.js';
 import { requireKey } from '../config.js';
-import { fetchIssues, type IssueListFilter } from '../linear.js';
+import { fetchIssues, fetchViewer, type IssueListFilter } from '../linear.js';
 import { assertKnownFlags, takeFlag, takeAllFlags } from '../args.js';
 import { AxiError } from '../errors.js';
 import {
@@ -96,21 +96,27 @@ export async function issuesCommand(
 
   if (assignee) {
     if (assignee.toLowerCase() === 'me') {
-      filter.assigneeIsMe = true;
+      // "me" resolves to the viewer's email (Linear has no isMe comparator).
+      const viewer = await fetchViewer(apiKey).catch(() => null);
+      if (!viewer?.email) {
+        throw new AxiError(
+          'Could not resolve your Linear user for --assignee me',
+          'UNKNOWN',
+        );
+      }
+      filter.assigneeEmail = viewer.email;
     } else {
       filter.assigneeName = assignee;
     }
   }
 
-  // `issues` supports a single label filter in the API; combine names with OR
-  // by issuing one query per label would be heavier — for v1 use the first
-  // label only and surface a hint when more were passed.
+  // The API matches "at least one label"; pass the first label only for v1.
   if (labels.length) filter.label = labels[0];
 
-  const { issues, totalCount } = await fetchIssues(apiKey, filter, limit);
+  const { issues } = await fetchIssues(apiKey, filter, limit);
 
   const blocks: string[] = [];
-  blocks.push(formatCountLine({ count: issues.length, limit, totalCount }));
+  blocks.push(formatCountLine({ count: issues.length, limit }));
 
   if (issues.length) {
     blocks.push(renderList('issues', issues, listSchema));

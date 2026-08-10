@@ -23,12 +23,15 @@ export async function homeCommand(
 ): Promise<string> {
   const apiKey = requireKey(ctx.apiKey);
 
-  const [viewer, assigned] = await Promise.all([
-    fetchViewer(apiKey).catch(() => null),
-    fetchIssues(apiKey, { assigneeIsMe: true, stateType: 'started' }, 5).catch(
-      () => ({ issues: [], totalCount: 0 }),
-    ),
-  ]);
+  const viewer = await fetchViewer(apiKey).catch(() => null);
+  const assigned =
+    viewer && viewer.email
+      ? await fetchIssues(
+          apiKey,
+          { assigneeEmail: viewer.email, stateType: 'started' },
+          5,
+        ).catch(() => ({ issues: [] }))
+      : { issues: [] };
 
   const blocks: string[] = [];
 
@@ -44,9 +47,9 @@ export async function homeCommand(
   );
 
   const hints: string[] = [];
-  if (assigned.totalCount > started.length) {
+  if (started.length >= 5) {
     hints.push(
-      `Run \`linear-axi issues --assignee me\` for all ${assigned.totalCount} assigned`,
+      'Run `linear-axi issues --assignee me` for more assigned issues',
     );
   }
   hints.push('Run `linear-axi issues` to list recent issues');
