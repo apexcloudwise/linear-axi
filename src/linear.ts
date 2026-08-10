@@ -201,7 +201,7 @@ export async function fetchIssue(
 ): Promise<LinearIssue | undefined> {
   const data = await linearRequest<{ issue: LinearIssue | null }>(
     apiKey,
-    `query Issue($id: ID!) { issue(id: $id) { ${ISSUE_DETAIL_FIELDS} } }`,
+    `query Issue($id: String!) { issue(id: $id) { ${ISSUE_DETAIL_FIELDS} } }`,
     { id: ref },
   );
   return data.issue ?? undefined;
@@ -239,7 +239,7 @@ export async function createIssue(
     issueCreate: { issue: LinearIssue; success: boolean };
   }>(
     apiKey,
-    `mutation CreateIssue($teamId: ID!, $title: String!, $description: String, $labelIds: [ID!]) {
+    `mutation CreateIssue($teamId: String!, $title: String!, $description: String, $labelIds: [String!]) {
       issueCreate(input: {
         teamId: $teamId
         title: $title
@@ -290,7 +290,7 @@ export async function updateIssue(
     issueUpdate: { issue: LinearIssue; success: boolean };
   }>(
     apiKey,
-    `mutation UpdateIssue($id: ID!, $title: String, $description: String, $priority: Float, $stateId: ID) {
+    `mutation UpdateIssue($id: String!, $title: String, $description: String, $priority: Int, $stateId: String) {
       issueUpdate(id: $id, input: {
         title: $title
         description: $description
@@ -321,7 +321,7 @@ export async function deleteIssue(apiKey: string, id: string): Promise<void> {
     issueDelete: { success: boolean };
   }>(
     apiKey,
-    `mutation DeleteIssue($id: ID!) {
+    `mutation DeleteIssue($id: String!) {
       issueDelete(id: $id) { success }
     }`,
     { id },
@@ -340,7 +340,7 @@ export async function createComment(
     commentCreate: { success: boolean };
   }>(
     apiKey,
-    `mutation Comment($issueId: ID!, $body: String!) {
+    `mutation Comment($issueId: String!, $body: String!) {
       commentCreate(input: { issueId: $issueId, body: $body }) {
         success
       }
@@ -400,7 +400,7 @@ async function resolveStateIdByName(
     };
   }>(
     apiKey,
-    `query TeamStates($id: ID!) {
+    `query TeamStates($id: String!) {
       team(id: $id) { states { nodes { id name type } } }
     }`,
     { id: teamId },
