@@ -235,27 +235,35 @@ export async function createIssue(
     ? await resolveLabelIds(apiKey, input.labelNames)
     : [];
 
+  // Linear's IssueCreateInput rejects `null` for optional fields (notably
+  // labelIds: "should not be null"). Build the input with only the fields that
+  // have values, declaring a matching variable for each.
+  const inputFields = ['teamId: $teamId', 'title: $title'];
+  const varDecls = ['$teamId: String!', '$title: String!'];
+  const variables: Record<string, unknown> = { teamId, title: input.title };
+
+  if (input.description !== undefined) {
+    inputFields.push('description: $description');
+    varDecls.push('$description: String');
+    variables['description'] = input.description;
+  }
+  if (labelIds.length) {
+    inputFields.push('labelIds: $labelIds');
+    varDecls.push('$labelIds: [String!]');
+    variables['labelIds'] = labelIds;
+  }
+
   const data = await linearRequest<{
     issueCreate: { issue: LinearIssue; success: boolean };
   }>(
     apiKey,
-    `mutation CreateIssue($teamId: String!, $title: String!, $description: String, $labelIds: [String!]) {
-      issueCreate(input: {
-        teamId: $teamId
-        title: $title
-        description: $description
-        labelIds: $labelIds
-      }) {
+    `mutation CreateIssue(${varDecls.join(', ')}) {
+      issueCreate(input: { ${inputFields.join(', ')} }) {
         success
         issue { id identifier title state { name type } team { key } url }
       }
     }`,
-    {
-      teamId,
-      title: input.title,
-      description: input.description ?? null,
-      labelIds: labelIds.length ? labelIds : null,
-    },
+    variables,
   );
 
   if (!data.issueCreate.success) {
@@ -286,28 +294,45 @@ export async function updateIssue(
     stateId = await resolveStateIdByName(apiKey, id, update.stateName);
   }
 
+  // Build the input from only the fields that have values — Linear rejects
+  // `null` for some optional IssueUpdateInput fields (same class of error as
+  // create's labelIds).
+  const inputFields: string[] = [];
+  const varDecls = ['$id: String!'];
+  const variables: Record<string, unknown> = { id };
+
+  if (update.title !== undefined) {
+    inputFields.push('title: $title');
+    varDecls.push('$title: String');
+    variables['title'] = update.title;
+  }
+  if (update.description !== undefined) {
+    inputFields.push('description: $description');
+    varDecls.push('$description: String');
+    variables['description'] = update.description;
+  }
+  if (update.priority !== undefined) {
+    inputFields.push('priority: $priority');
+    varDecls.push('$priority: Int');
+    variables['priority'] = update.priority;
+  }
+  if (stateId !== undefined) {
+    inputFields.push('stateId: $stateId');
+    varDecls.push('$stateId: String');
+    variables['stateId'] = stateId;
+  }
+
   const data = await linearRequest<{
     issueUpdate: { issue: LinearIssue; success: boolean };
   }>(
     apiKey,
-    `mutation UpdateIssue($id: String!, $title: String, $description: String, $priority: Int, $stateId: String) {
-      issueUpdate(id: $id, input: {
-        title: $title
-        description: $description
-        priority: $priority
-        stateId: $stateId
-      }) {
+    `mutation UpdateIssue(${varDecls.join(', ')}) {
+      issueUpdate(id: $id, input: { ${inputFields.join(', ')} }) {
         success
         issue { id identifier title state { name type } team { key } url }
       }
     }`,
-    {
-      id,
-      title: update.title ?? null,
-      description: update.description ?? null,
-      priority: update.priority ?? null,
-      stateId: stateId ?? null,
-    },
+    variables,
   );
 
   if (!data.issueUpdate.success) {
