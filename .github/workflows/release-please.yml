@@ -32,9 +32,12 @@ jobs:
           manifest-file: .release-please-manifest.json
 
   publish:
+    needs: release-please
     if: |
-      (needs.release-please.result == 'success' && needs.release-please.outputs.release_created) ||
-      github.event_name == 'workflow_dispatch'
+      always() && (
+        (needs.release-please.result == 'success' && needs.release-please.outputs.release_created) ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -89,7 +92,7 @@ jobs:
             [ "$PKG_VERSION" = "$RELEASE_VERSION" ] || { echo "FAIL: package version ${PKG_VERSION} != release version ${RELEASE_VERSION}"; exit 1; }
           fi
           case "${CHECKOUT_TAG}" in
-            *"${PKG_VERSION}") echo "Tag ends with v${PKG_VERSION}: OK" ;;
+            *"v${PKG_VERSION}") echo "Tag ends with v${PKG_VERSION}: OK" ;;
             *) echo "FAIL: tag ${CHECKOUT_TAG} does not end with v${PKG_VERSION}"; exit 1 ;;
           esac
 
