@@ -1,0 +1,88 @@
+name: Bug report
+description: Report reproducible incorrect behavior in linear-axi
+title: 'bug: '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve linear-axi. Never include a Linear API key or other credential.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong, and what operation were you trying to perform?
+      placeholder: A concise description of the failure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest sequence that reliably demonstrates the problem.
+      placeholder: |
+        1. Run `linear-axi ...`
+        2. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include structured output or an error message after removing credentials and private workspace data.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: linear-axi version
+      description: Output from `linear-axi --version`.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - npm global install
+        - npx
+        - Nix or Home Manager
+        - Source checkout
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, and Node.js version.
+      placeholder: macOS 15, arm64, Node 24.6.0
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed API keys, tokens, private issue content, and personal data from this report.
+          required: true
+        - label: I searched existing issues for the same behavior.
+          required: true
