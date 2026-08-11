@@ -1,0 +1,74 @@
+name: Feature request
+description: Propose a user-facing capability or behavior change
+title: 'feat: '
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the outcome before the implementation. AXI changes should remain concise, deterministic, and agent-friendly.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today, and who encounters it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior rather than a preferred implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: interface
+    attributes:
+      label: Proposed CLI interface
+      description: Show representative commands and compact output, if known.
+      render: shell
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and boundaries
+      description: State what belongs in this change and what explicitly does not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List concrete conditions that would demonstrate completion.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include existing commands, GraphQL, or composition options that were considered.
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Compatibility and safety
+      description: Note authentication, mutation, output-schema, token-cost, or backward-compatibility implications.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this request.
+          required: true
+        - label: This report contains no API keys, tokens, or private Linear data.
+          required: true

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/apexcloudwise/linear-axi/security/advisories/new
+    about: Privately report vulnerabilities, exposed credentials, or sensitive data.

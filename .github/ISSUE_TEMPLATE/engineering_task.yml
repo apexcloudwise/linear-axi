@@ -1,0 +1,77 @@
+name: Engineering task
+description: Define bounded maintenance, release, CI, or documentation work
+title: 'chore: '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for work with a concrete outcome, bounded scope, and independently verifiable completion criteria.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What repository state or operational capability should exist when this is complete?
+    validations:
+      required: true
+
+  - type: input
+    id: parent
+    attributes:
+      label: Parent or related issue
+      description: Link an epic, dependency, or related issue when one exists.
+      placeholder: '#1'
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Record the present state, evidence, and reason the work is needed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the changes included in this task.
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Boundaries
+      description: State exclusions, owner-operated steps, or actions that must remain manual.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use checkboxes for observable and testable completion conditions.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: Identify the commands, CI jobs, or owner-operated evidence required.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: This task does not include credentials or private Linear data.
+          required: true
+        - label: Destructive or outward-facing actions are explicitly identified above.
+          required: true
