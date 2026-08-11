@@ -52,7 +52,7 @@ jobs:
           tar tzf "$TARBALL" > /tmp/tarball-entries.txt
           echo "Tarball contents:"
           cat /tmp/tarball-entries.txt
-          for required in "package.json" "dist/bin/linear-axi.js" "skills/linear-axi" "README.md" "LICENSE"; do
+          for required in "package.json" "dist/bin/linear-axi.js" "skills/linear-axi/SKILL.md" "README.md" "LICENSE"; do
             grep -q "^package/${required}$" /tmp/tarball-entries.txt || {
               echo "FAIL: missing required entry '${required}' in tarball"
               exit 1
