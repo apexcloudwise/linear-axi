@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/apexcloudwise/linear-axi/compare/linear-axi-v0.1.1...linear-axi-v0.1.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* prefix-agnostic tag assertion, add workflow_dispatch, normalize tags ([#15](https://github.com/apexcloudwise/linear-axi/issues/15)) ([82d550c](https://github.com/apexcloudwise/linear-axi/commit/82d550c0470bbdadff89c6dbf17fc4abd8ee7eb1))
+
 ## [0.1.1](https://github.com/apexcloudwise/linear-axi/compare/linear-axi-v0.1.0...linear-axi-v0.1.1) (2026-08-11)
 
 
