@@ -33,21 +33,37 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v6
         with:
           version: 11.1.1
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm
 
+      - name: Enforce npm minimum version
+        run: |
+          NPM_MAJOR=$(npm --version | cut -d. -f1)
+          echo "npm major version: ${NPM_MAJOR}"
+          [ "$NPM_MAJOR" -ge 11 ] || { echo "FAIL: npm >=11 required for --provenance"; exit 1; }
+
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run build:skill
+
+      - name: Assert tag matches package version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          EXPECTED_TAG="v${PKG_VERSION}"
+          echo "Package version: ${PKG_VERSION}"
+          echo "Tag: ${TAG}"
+          echo "Expected tag: ${EXPECTED_TAG}"
+          [ "$TAG" = "$EXPECTED_TAG" ] || { echo "FAIL: tag ${TAG} does not match v${PKG_VERSION}"; exit 1; }
 
       - run: npm publish --provenance --access public
