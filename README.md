@@ -101,16 +101,16 @@ Go to *Settings → Environments → New environment*, name it `release`. Option
 
 **3. First publish (manual)**
 
-From a clean checkout of the release tag, publish `0.1.0` manually:
+From a clean checkout of `main`, publish `0.1.0` manually:
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm run build
 pnpm run build:skill
-npm publish --provenance --access public
+npm publish --access public
 ```
 
-This creates the package on npm. 2FA will be required. This is a one-time step.
+This creates the package on npm. 2FA will be required. This is a one-time step. The manual publish won't carry provenance — provenance begins with the first CI-driven publish via the release workflow (see step 5).
 
 **4. Bind npm trusted publishing**
 
