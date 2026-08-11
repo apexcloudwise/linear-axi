@@ -55,5 +55,9 @@ jobs:
       - name: Smoke-test installed binary
         run: |
           export PATH="/tmp/packed-install/node_modules/.bin:$PATH"
-          linear-axi --version
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          INSTALLED_VERSION=$(linear-axi --version)
+          echo "Package version: $PKG_VERSION"
+          echo "Installed version: $INSTALLED_VERSION"
+          [ "$INSTALLED_VERSION" = "$PKG_VERSION" ]
           linear-axi --help
