@@ -78,6 +78,8 @@ pnpm run lint
 
 Releases are automated via [Release Please](https://github.com/googleapis/release-please-action). Pushing a conventional commit (e.g. `fix:`, `feat:`) to `main` opens or updates a release PR containing the version bump, CHANGELOG, and manifest.
 
+**Prerequisite:** repo admin must enable *Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve pull requests*.
+
 **To merge a release PR:**
 
 1. On the release PR, click **Approve workflows to run** in the PR banner to allow CI.
