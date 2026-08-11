@@ -87,6 +87,40 @@ Releases are automated via [Release Please](https://github.com/googleapis/releas
 3. Review the version bump and CHANGELOG entries.
 4. Merge the release PR — the tag and GitHub release are created automatically.
 
+## Publishing setup
+
+Publishing is fully automated via trusted OIDC — no npm tokens are stored. A one-time owner bootstrap is required:
+
+**1. Enable 2FA on the npm account**
+
+Log in at https://www.npmjs.com and enable two-factor authentication (auth-only or auth-and-writes).
+
+**2. Create the `release` GitHub environment**
+
+Go to *Settings → Environments → New environment*, name it `release`. Optionally add required reviewers for a human approval gate before publish.
+
+**3. Bind npm trusted publishing**
+
+On https://www.npmjs.com, navigate to the `@apexcloudwise/linear-axi` package (or create it if it doesn't exist), then *Publishing access → Link a GitHub repository*:
+
+- **Repository:** `apexcloudwise/linear-axi`
+- **Workflow:** `release-please.yml`
+- **Environment:** `release`
+
+**4. Verify**
+
+After the next release PR is merged (see Releasing), confirm:
+
+```sh
+npm view @apexcloudwise/linear-axi version
+```
+
+Check that the package page on npm shows a provenance badge linked to this repository.
+
+**5. First publish**
+
+Trusted publishing can handle the first publish — no manual `npm publish` is needed. Once the binding is configured, merging a release PR triggers the OIDC publish job automatically.
+
 ## License
 
 MIT © ApexCloudWise
