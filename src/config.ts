@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, openSync, writeSync, closeSync, constants } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, chmodSync, openSync, writeSync, closeSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { AxiError, missingKeyError } from './errors.js';
@@ -50,16 +50,12 @@ export function saveApiKey(key: string): void {
 export function saveApiKeyToPath(filePath: string, key: string): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const data = JSON.stringify({ apiKey: key }, null, 2) + '\n';
-  if (existsSync(filePath)) {
-    chmodSync(filePath, 0o600);
-    writeFileSync(filePath, data);
-  } else {
-    const fd = openSync(filePath, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
-    try {
-      writeSync(fd, data);
-    } finally {
-      closeSync(fd);
-    }
+  if (existsSync(filePath)) chmodSync(filePath, 0o600);
+  const fd = openSync(filePath, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
+  try {
+    writeSync(fd, data);
+  } finally {
+    closeSync(fd);
   }
 }
 
