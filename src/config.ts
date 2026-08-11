@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, chmodSync, openSync, writeSync, closeSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { AxiError, missingKeyError } from './errors.js';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'linear-axi');
@@ -44,8 +44,19 @@ export function requireKey(apiKey: string | undefined): string {
 
 /** Persist a key to the config file (used by the `login` command). */
 export function saveApiKey(key: string): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ apiKey: key }, null, 2) + '\n');
+  saveApiKeyToPath(CONFIG_PATH, key);
+}
+
+export function saveApiKeyToPath(filePath: string, key: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const data = JSON.stringify({ apiKey: key }, null, 2) + '\n';
+  if (existsSync(filePath)) chmodSync(filePath, 0o600);
+  const fd = openSync(filePath, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
+  try {
+    writeSync(fd, data);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function readConfig(): LinearConfig {
