@@ -47,6 +47,19 @@ jobs:
           npm pack
           echo "TARBALL=$(ls apexcloudwise-linear-axi-*.tgz | head -1)" >> "$GITHUB_ENV"
 
+      - name: Assert required tarball entries
+        run: |
+          tar tzf "$TARBALL" > /tmp/tarball-entries.txt
+          echo "Tarball contents:"
+          cat /tmp/tarball-entries.txt
+          for required in "package.json" "dist/bin/linear-axi.js" "skills/linear-axi" "README.md" "LICENSE"; do
+            grep -q "^package/${required}$" /tmp/tarball-entries.txt || {
+              echo "FAIL: missing required entry '${required}' in tarball"
+              exit 1
+            }
+          done
+          echo "All required tarball entries present."
+
       - name: Install tarball into clean prefix
         run: |
           mkdir -p /tmp/packed-install
