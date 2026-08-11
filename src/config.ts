@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { AxiError, missingKeyError } from './errors.js';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'linear-axi');
@@ -46,6 +46,13 @@ export function requireKey(apiKey: string | undefined): string {
 export function saveApiKey(key: string): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify({ apiKey: key }, null, 2) + '\n');
+  chmodSync(CONFIG_PATH, 0o600);
+}
+
+export function saveApiKeyToPath(filePath: string, key: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, JSON.stringify({ apiKey: key }, null, 2) + '\n');
+  chmodSync(filePath, 0o600);
 }
 
 export function readConfig(): LinearConfig {

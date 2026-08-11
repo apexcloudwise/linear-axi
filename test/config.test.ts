@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { resolveGlobalFlags, parseIssueRef } from '../src/config.js';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { mkdirSync, writeFileSync, chmodSync, statSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { resolveGlobalFlags, parseIssueRef, saveApiKeyToPath } from '../src/config.js';
 
 describe('resolveGlobalFlags', () => {
   it('strips --key in space form and resolves the key', () => {
@@ -61,5 +64,48 @@ describe('parseIssueRef', () => {
 
   it('rejects garbage', () => {
     expect(() => parseIssueRef('not-a-ref')).toThrow();
+  });
+});
+
+describe('saveApiKey file permissions', () => {
+  let tmpHome: string;
+  let tmpConfigDir: string;
+  let tmpConfigPath: string;
+
+  beforeEach(() => {
+    tmpHome = join(tmpdir(), `linear-axi-perm-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tmpConfigDir = join(tmpHome, '.config', 'linear-axi');
+    tmpConfigPath = join(tmpConfigDir, 'config.json');
+  });
+
+  afterEach(() => {
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('creates a new config file with mode 0600 regardless of umask', () => {
+    mkdirSync(tmpConfigDir, { recursive: true });
+    saveApiKeyToPath(tmpConfigPath, 'lin_api_testkey');
+
+    const mode = statSync(tmpConfigPath).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('repairs an existing config file from 0644 to 0600 on re-save', () => {
+    mkdirSync(tmpConfigDir, { recursive: true });
+    writeFileSync(tmpConfigPath, JSON.stringify({ apiKey: 'old-key' }, null, 2) + '\n');
+    chmodSync(tmpConfigPath, 0o644);
+
+    saveApiKeyToPath(tmpConfigPath, 'lin_api_newkey');
+
+    const mode = statSync(tmpConfigPath).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('does not leak token values in assertions', () => {
+    mkdirSync(tmpConfigDir, { recursive: true });
+    saveApiKeyToPath(tmpConfigPath, 'lin_api_s3cret_t0ken');
+
+    const exists = existsSync(tmpConfigPath);
+    expect(exists).toBe(true);
   });
 });
