@@ -51,8 +51,8 @@ export function saveApiKeyToPath(filePath: string, key: string): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const data = JSON.stringify({ apiKey: key }, null, 2) + '\n';
   if (existsSync(filePath)) {
-    writeFileSync(filePath, data);
     chmodSync(filePath, 0o600);
+    writeFileSync(filePath, data);
   } else {
     const fd = openSync(filePath, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
     try {
