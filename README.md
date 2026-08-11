@@ -91,7 +91,7 @@ Releases are automated via [Release Please](https://github.com/googleapis/releas
 
 Publishing is fully automated via trusted OIDC — no npm tokens are stored. A one-time owner bootstrap is required:
 
-> **Important:** Do not merge any release PR (e.g. #12) before completing steps 1–4 below. The release-please workflow's `publish` job will fail until trusted publishing is bound.
+> **Important:** Do not merge any release PR (e.g. #12) before completing steps 1–5 below. The release-please workflow's `publish` job will fail until trusted publishing is bound.
 
 **1. Enable 2FA on the npm account**
 
@@ -142,7 +142,7 @@ mkdir /tmp/verify-install && npm install --prefix /tmp/verify-install @apexcloud
 /tmp/verify-install/node_modules/.bin/linear-axi --version
 ```
 
-Confirm the reported version matches the published version and that the package is publicly visible (`"access": "public"`). Subsequent releases are automated via the workflow.
+Confirm the reported version matches the published version and that the package is publicly visible (`"access": "public"`). Subsequent releases are automated via the workflow. When recording #5 completion evidence (e.g. `npm view` output, install logs), ensure all evidence is sanitized — no tokens, secrets, or reusable authentication material.
 
 ## License
 
