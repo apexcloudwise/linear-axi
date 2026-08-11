@@ -3,6 +3,11 @@ name: release-please
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
 
 permissions:
   contents: write
@@ -13,6 +18,7 @@ concurrency:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -27,7 +33,11 @@ jobs:
 
   publish:
     needs: release-please
-    if: needs.release-please.outputs.release_created
+    if: |
+      always() && (
+        (needs.release-please.result == 'success' && needs.release-please.outputs.release_created) ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -36,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ format('refs/tags/{0}', github.event.inputs.tag || needs.release-please.outputs.tag_name) }}
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
@@ -72,15 +82,18 @@ jobs:
       - name: Assert release version integrity
         env:
           RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
-          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          CHECKOUT_TAG: ${{ github.event.inputs.tag || needs.release-please.outputs.tag_name }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          EXPECTED_TAG="v${RELEASE_VERSION}"
           echo "Package version: ${PKG_VERSION}"
-          echo "Release version: ${RELEASE_VERSION}"
-          echo "Release tag: ${RELEASE_TAG}"
-          echo "Expected tag: ${EXPECTED_TAG}"
-          [ "$PKG_VERSION" = "$RELEASE_VERSION" ] || { echo "FAIL: package version ${PKG_VERSION} != release version ${RELEASE_VERSION}"; exit 1; }
-          [ "$RELEASE_TAG" = "$EXPECTED_TAG" ] || { echo "FAIL: tag ${RELEASE_TAG} != expected ${EXPECTED_TAG}"; exit 1; }
+          echo "Checkout tag: ${CHECKOUT_TAG}"
+          if [ "$RELEASE_VERSION" ]; then
+            echo "Release version: ${RELEASE_VERSION}"
+            [ "$PKG_VERSION" = "$RELEASE_VERSION" ] || { echo "FAIL: package version ${PKG_VERSION} != release version ${RELEASE_VERSION}"; exit 1; }
+          fi
+          case "${CHECKOUT_TAG}" in
+            *"v${PKG_VERSION}") echo "Tag ends with v${PKG_VERSION}: OK" ;;
+            *) echo "FAIL: tag ${CHECKOUT_TAG} does not end with v${PKG_VERSION}"; exit 1 ;;
+          esac
 
       - run: npm publish --provenance --access public
