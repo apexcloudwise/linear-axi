@@ -91,6 +91,8 @@ Releases are automated via [Release Please](https://github.com/googleapis/releas
 
 Publishing is fully automated via trusted OIDC — no npm tokens are stored. A one-time owner bootstrap is required:
 
+> **Important:** Do not merge any release PR (e.g. #12) before completing steps 1–4 below. The release-please workflow's `publish` job will fail until trusted publishing is bound.
+
 **1. Enable 2FA on the npm account**
 
 Log in at https://www.npmjs.com and enable two-factor authentication (auth-only or auth-and-writes).
@@ -110,19 +112,22 @@ pnpm run build:skill
 npm publish --access public
 ```
 
-This creates the package on npm. 2FA will be required. This is a one-time step. The manual publish won't carry provenance — provenance begins with the first CI-driven publish via the release workflow (see step 5).
+This creates the package on npm. 2FA will be required. This is a one-time step. The manual publish won't carry provenance — provenance begins with the first CI-driven publish via the release workflow (see step 6).
 
-**4. Bind npm trusted publishing**
+**4. Revoke traditional publishing tokens**
+
+On https://www.npmjs.com, under *Access tokens*, ensure no automation tokens with publish access exist for the `@apexcloudwise` scope. Remove any legacy tokens. All subsequent publishes must go through trusted publishing (OIDC) only.
+
+**5. Bind npm trusted publishing**
 
 On https://www.npmjs.com, navigate to the `@apexcloudwise/linear-axi` package, then *Publishing access → Link a GitHub repository*:
 
 - **Repository:** `apexcloudwise/linear-axi`
 - **Workflow:** `release-please.yml`
 - **Environment:** `release`
+- **Allowed actions:** `npm publish`
 
-> **Note:** if npm permits pre-configuring a linked publisher for a not-yet-published package, the manual first publish can be skipped and trusted publishing can handle the initial release. Default to manual-first if unsure.
-
-**5. Verify**
+**6. Verify**
 
 After the next release PR is merged (see Releasing), confirm:
 
@@ -130,7 +135,14 @@ After the next release PR is merged (see Releasing), confirm:
 npm view @apexcloudwise/linear-axi version
 ```
 
-Check that the package page on npm shows a provenance badge linked to this repository. Subsequent releases are automated via the workflow.
+Check that the package page on npm shows a provenance badge linked to this repository. Then verify a clean install:
+
+```sh
+mkdir /tmp/verify-install && npm install --prefix /tmp/verify-install @apexcloudwise/linear-axi
+/tmp/verify-install/node_modules/.bin/linear-axi --version
+```
+
+Confirm the reported version matches the published version and that the package is publicly visible (`"access": "public"`). Subsequent releases are automated via the workflow.
 
 ## License
 
