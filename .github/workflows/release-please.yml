@@ -53,8 +53,17 @@ jobs:
         run: |
           NPM_VERSION=$(npm --version)
           echo "npm version: ${NPM_VERSION}"
-          if ! node -e "process.exit(process.argv[1] >= '11.5.1' ? 0 : 1)" "$NPM_VERSION"; then
-            echo "FAIL: npm >=11.5.1 required for trusted publishing --provenance"
+          NPM_MAJOR=$(echo "$NPM_VERSION" | cut -d. -f1)
+          NPM_MINOR=$(echo "$NPM_VERSION" | cut -d. -f2)
+          NPM_PATCH=$(echo "$NPM_VERSION" | cut -d. -f3)
+          if [ "$NPM_MAJOR" -gt 11 ]; then
+            true
+          elif [ "$NPM_MAJOR" -eq 11 ] && [ "$NPM_MINOR" -gt 5 ]; then
+            true
+          elif [ "$NPM_MAJOR" -eq 11 ] && [ "$NPM_MINOR" -eq 5 ] && [ "$NPM_PATCH" -ge 1 ]; then
+            true
+          else
+            echo "FAIL: npm >=11.5.1 required for trusted publishing --provenance (found ${NPM_VERSION})"
             exit 1
           fi
 
