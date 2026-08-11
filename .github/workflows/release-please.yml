@@ -17,6 +17,7 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -36,8 +37,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
 
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11.1.1
 
@@ -48,22 +51,29 @@ jobs:
 
       - name: Enforce npm minimum version
         run: |
-          NPM_MAJOR=$(npm --version | cut -d. -f1)
-          echo "npm major version: ${NPM_MAJOR}"
-          [ "$NPM_MAJOR" -ge 11 ] || { echo "FAIL: npm >=11 required for --provenance"; exit 1; }
+          NPM_VERSION=$(npm --version)
+          echo "npm version: ${NPM_VERSION}"
+          if ! node -e "process.exit(process.argv[1] >= '11.5.1' ? 0 : 1)" "$NPM_VERSION"; then
+            echo "FAIL: npm >=11.5.1 required for trusted publishing --provenance"
+            exit 1
+          fi
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run build:skill
 
-      - name: Assert tag matches package version
+      - name: Assert release version integrity
+        env:
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG="${{ needs.release-please.outputs.tag_name }}"
-          EXPECTED_TAG="v${PKG_VERSION}"
+          EXPECTED_TAG="v${RELEASE_VERSION}"
           echo "Package version: ${PKG_VERSION}"
-          echo "Tag: ${TAG}"
+          echo "Release version: ${RELEASE_VERSION}"
+          echo "Release tag: ${RELEASE_TAG}"
           echo "Expected tag: ${EXPECTED_TAG}"
-          [ "$TAG" = "$EXPECTED_TAG" ] || { echo "FAIL: tag ${TAG} does not match v${PKG_VERSION}"; exit 1; }
+          [ "$PKG_VERSION" = "$RELEASE_VERSION" ] || { echo "FAIL: package version ${PKG_VERSION} != release version ${RELEASE_VERSION}"; exit 1; }
+          [ "$RELEASE_TAG" = "$EXPECTED_TAG" ] || { echo "FAIL: tag ${RELEASE_TAG} != expected ${EXPECTED_TAG}"; exit 1; }
 
       - run: npm publish --provenance --access public
