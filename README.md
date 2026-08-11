@@ -74,6 +74,17 @@ pnpm test               # vitest
 pnpm run lint
 ```
 
+## Releasing
+
+Releases are automated via [Release Please](https://github.com/googleapis/release-please-action). Pushing a conventional commit (e.g. `fix:`, `feat:`) to `main` opens or updates a release PR containing the version bump, CHANGELOG, and manifest.
+
+**To merge a release PR:**
+
+1. On the release PR, click **Approve workflows to run** in the PR banner to allow CI.
+2. Wait for `build-and-test` and `packed-tarball` jobs to pass.
+3. Review the version bump and CHANGELOG entries.
+4. Merge the release PR — the tag and GitHub release are created automatically.
+
 ## License
 
 MIT © ApexCloudWise
