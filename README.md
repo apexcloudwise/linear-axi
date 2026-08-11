@@ -99,15 +99,30 @@ Log in at https://www.npmjs.com and enable two-factor authentication (auth-only 
 
 Go to *Settings → Environments → New environment*, name it `release`. Optionally add required reviewers for a human approval gate before publish.
 
-**3. Bind npm trusted publishing**
+**3. First publish (manual)**
 
-On https://www.npmjs.com, navigate to the `@apexcloudwise/linear-axi` package (or create it if it doesn't exist), then *Publishing access → Link a GitHub repository*:
+From a clean checkout of the release tag, publish `0.1.0` manually:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm run build:skill
+npm publish --provenance --access public
+```
+
+This creates the package on npm. 2FA will be required. This is a one-time step.
+
+**4. Bind npm trusted publishing**
+
+On https://www.npmjs.com, navigate to the `@apexcloudwise/linear-axi` package, then *Publishing access → Link a GitHub repository*:
 
 - **Repository:** `apexcloudwise/linear-axi`
 - **Workflow:** `release-please.yml`
 - **Environment:** `release`
 
-**4. Verify**
+> **Note:** if npm permits pre-configuring a linked publisher for a not-yet-published package, the manual first publish can be skipped and trusted publishing can handle the initial release. Default to manual-first if unsure.
+
+**5. Verify**
 
 After the next release PR is merged (see Releasing), confirm:
 
@@ -115,11 +130,7 @@ After the next release PR is merged (see Releasing), confirm:
 npm view @apexcloudwise/linear-axi version
 ```
 
-Check that the package page on npm shows a provenance badge linked to this repository.
-
-**5. First publish**
-
-Trusted publishing can handle the first publish — no manual `npm publish` is needed. Once the binding is configured, merging a release PR triggers the OIDC publish job automatically.
+Check that the package page on npm shows a provenance badge linked to this repository. Subsequent releases are automated via the workflow.
 
 ## License
 
