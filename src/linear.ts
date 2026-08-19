@@ -652,6 +652,94 @@ export async function fetchComments(
   return { comments: comments.slice(0, limit), hasMore };
 }
 
+/** Selection for label nodes. `color` is a raw HEX string (see LinearLabel). */
+export const LABEL_LIST_FIELDS = `
+  id
+  name
+  color
+`;
+
+/**
+ * A Linear issue label as returned by LABEL_LIST_FIELDS. Labels can be
+ * workspace-level or team-scoped; `color` is a HEX string like "#EB5757"
+ * ("The label's color as a HEX string (e.g., '#EB5757')" per the generated
+ * IssueLabel type in @linear/sdk, where color is a non-nullable String).
+ * Rendered raw — terminal color support varies, so no ANSI swatch is
+ * attempted.
+ */
+export interface LinearLabel {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface LabelListResult {
+  labels: LinearLabel[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more labels
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface LabelListPage {
+  nodes: LinearLabel[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List the workspace's issue labels, most recently updated first,
+ * auto-paginated in PAGE_SIZE (50) batches like fetchProjects until `limit`
+ * is satisfied or the server reports no more pages. The root `issueLabels`
+ * connection takes the same after/filter/first/orderBy args as the other
+ * list connections (QueryIssueLabelsArgs in @linear/sdk); PaginationOrderBy
+ * only offers createdAt/updatedAt, so updatedAt is the recent-first
+ * ordering, matching issues, projects, and cycles. The default limit (500)
+ * is generous for real workspaces while still guarding a runaway cursor;
+ * `hasMore` in the result says whether truncation occurred.
+ */
+export async function fetchLabels(
+  apiKey: string,
+  limit = 500,
+): Promise<LabelListResult> {
+  const query = `query Labels($first: Int!, $after: String) {
+    issueLabels(first: $first, after: $after, orderBy: updatedAt) {
+      nodes { ${LABEL_LIST_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+  const labels: LinearLabel[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (labels.length < limit) {
+    const first = Math.min(limit - labels.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{ issueLabels: LabelListPage }>(
+      apiKey,
+      query,
+      variables,
+    );
+
+    labels.push(...data.issueLabels.nodes);
+
+    hasMore = data.issueLabels.pageInfo?.hasNextPage ?? false;
+    const nextCursor = data.issueLabels.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues/fetchProjects/fetchCycles/fetchComments.
+    if (!hasMore || nextCursor === undefined) break;
+    if (data.issueLabels.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { labels: labels.slice(0, limit), hasMore };
+}
+
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
@@ -864,15 +952,19 @@ export async function resolveProjectId(
   return data.projects.nodes[0]?.id;
 }
 
+/**
+ * Resolve label names to their ids, case-insensitively, in server order.
+ * Reuses fetchLabels (auto-paginated) so label resolution keeps working in
+ * workspaces with more than one page (50) of labels — the old inline query
+ * here fetched a single unpaginated page and silently missed the rest.
+ */
 async function resolveLabelIds(
   apiKey: string,
   names: string[],
 ): Promise<string[]> {
+  const { labels } = await fetchLabels(apiKey);
   const wanted = names.map((n) => n.trim().toLowerCase());
-  const data = await linearRequest<{
-    issueLabels: { nodes: Array<{ id: string; name: string }> };
-  }>(apiKey, `query Labels { issueLabels { nodes { id name } } }`);
-  return data.issueLabels.nodes
+  return labels
     .filter((l) => wanted.includes(l.name.toLowerCase()))
     .map((l) => l.id);
 }

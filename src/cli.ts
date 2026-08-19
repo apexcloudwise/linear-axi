@@ -9,6 +9,7 @@ import { commentCommand, COMMENT_HELP } from './commands/comment.js';
 import { teamsCommand, TEAMS_HELP } from './commands/teams.js';
 import { projectsCommand, PROJECTS_HELP } from './commands/projects.js';
 import { cyclesCommand, CYCLES_HELP } from './commands/cycles.js';
+import { labelsCommand, LABELS_HELP } from './commands/labels.js';
 import { loginCommand, LOGIN_HELP } from './commands/login.js';
 import { setupCommand, SETUP_HELP } from './commands/setup.js';
 
@@ -30,8 +31,8 @@ type LinearCommand = (
 ) => Promise<Renderable>;
 
 export const TOP_HELP = `usage: linear-axi [command] [args] [flags]
-commands[8]:
-  (none)=dashboard, issues, issue, comment, teams, projects, cycles, login, setup
+commands[9]:
+  (none)=dashboard, issues, issue, comment, teams, projects, cycles, labels, login, setup
 globals[1]:
   --key <API_KEY> (after command) or LINEAR_API_KEY env, accepted in space or = form; --help always allowed
 examples:
@@ -46,6 +47,7 @@ examples:
   linear-axi teams
   linear-axi projects
   linear-axi cycles --team LIN
+  linear-axi labels
   linear-axi login lin_api_xxx
   linear-axi setup hooks
 `;
@@ -57,6 +59,7 @@ const COMMAND_HELP: Record<string, string> = {
   teams: TEAMS_HELP,
   projects: PROJECTS_HELP,
   cycles: CYCLES_HELP,
+  labels: LABELS_HELP,
   login: LOGIN_HELP,
   setup: SETUP_HELP,
 };
@@ -75,6 +78,7 @@ const COMMANDS: Record<string, AxiCliCommand<undefined>> = {
   teams: wrap(teamsCommand),
   projects: wrap(projectsCommand),
   cycles: wrap(cyclesCommand),
+  labels: wrap(labelsCommand),
   login: wrap(loginCommand),
   setup: wrap(setupCommand),
 };
