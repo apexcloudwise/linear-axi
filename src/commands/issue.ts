@@ -34,14 +34,15 @@ import {
   truncateForDisplay,
   type FieldDef,
 } from '../toon.js';
+import { readFileSync } from 'node:fs';
 
 export const ISSUE_HELP = `usage: linear-axi issue <subcommand> [args]
 Manage Linear issues.
 
 subcommands:
   view <IDENTIFIER|UUID>   show issue details (--full shows the full description and sub-issues; --fields <a,b,c> adds extra fields)
-  create --title "..." --team <KEY> [--description "..."] [--label <name>...] [--project <name>] [--cycle <current|number>] [--parent <IDENTIFIER|UUID>]
-  update <ref> [--state <name>] [--title "..."] [--priority <0-4>] [--description "..."]
+  create --title "..." --team <KEY> [--description "..."] [--description-file <path>] [--label <name>...] [--project <name>] [--cycle <current|number>] [--parent <IDENTIFIER|UUID>]
+  update <ref> [--state <name>] [--title "..."] [--priority <0-4>] [--description "..."] [--description-file <path>]
          [--assignee <name|me>] [--label <name>] [--remove-label <name>] [--project <name>] [--cycle <current|number>]
   delete <ref>
 
@@ -52,6 +53,11 @@ update flags:
   --assignee <name|me>     assign the issue; "me" is the authenticated viewer
   --label <name>           add a label (repeatable; names from \`linear-axi labels\`)
   --remove-label <name>    remove a label (repeatable); removing the last one clears labels
+
+description input (create and update):
+  --description "..."        inline description — fine for short, single-line text
+  --description-file <path>  read the description from a UTF-8 file instead (multi-line markdown without
+                             shell quoting); pass "-" to read stdin to EOF; pass only one of the two flags
 
 sub-issue flags:
   --parent <IDENTIFIER|UUID>   create: nest the new issue under this parent (fails loud if not found;
@@ -72,6 +78,8 @@ examples:
   linear-axi issue create --title "Fix login" --team ENG --label bug
   linear-axi issue create --title "Ship v2" --team LIN --project "Q3 launch" --cycle current
   linear-axi issue create --title "Wire the toggle" --team ENG --parent LIN-42
+  linear-axi issue create --title "Fix login" --team ENG --description-file ./issue.md
+  cat notes.md | linear-axi issue update LIN-123 --description-file -
   linear-axi issue update LIN-123 --state "In Progress"
   linear-axi issue update LIN-123 --assignee me --label bug
   linear-axi issue update LIN-123 --remove-label bug
@@ -86,6 +94,7 @@ const CREATE_FLAGS = [
   '--title',
   '--team',
   '--description',
+  '--description-file',
   '--label',
   '--project',
   '--cycle',
@@ -96,6 +105,7 @@ const UPDATE_FLAGS = [
   '--title',
   '--priority',
   '--description',
+  '--description-file',
   '--assignee',
   '--label',
   '--remove-label',
@@ -239,6 +249,11 @@ async function createIssueCmd(
   const title = takeFlag(args, '--title');
   const team = takeFlag(args, '--team');
   const description = takeFlag(args, '--description');
+  // has* detection must precede takeFlag (which removes the flag pair).
+  const hasDescriptionFile = args.some(
+    (a) => a === '--description-file' || a.startsWith('--description-file='),
+  );
+  const descriptionFile = takeFlag(args, '--description-file');
   const labels = takeAllFlags(args, '--label');
   // has* detection must precede takeFlag (which removes the flag pair).
   const hasProject = args.some(
@@ -264,6 +279,16 @@ async function createIssueCmd(
       'linear-axi issue create --team <KEY> (run `linear-axi teams` for keys)',
     ]);
   }
+
+  // --description-file (#28): mutual exclusion with --description (same
+  // convention as comment's --body/--body-file), then the read itself — a
+  // blank value, unreadable path, or empty input fails loud BEFORE any
+  // network request.
+  const descriptionInput = readDescriptionInput(
+    description,
+    hasDescriptionFile,
+    descriptionFile,
+  );
 
   // Blank/missing --project/--cycle values fail loud before any network
   // request (same guard shape as the `issues` read path).
@@ -325,7 +350,7 @@ async function createIssueCmd(
 
   const issue = await createIssue(apiKey, {
     title: title.trim(),
-    description,
+    description: descriptionInput,
     teamKey: team.trim(),
     labelNames: labels,
     projectId,
@@ -370,6 +395,10 @@ async function updateIssueCmd(
   const title = takeFlag(args, '--title');
   const priorityRaw = takeFlag(args, '--priority');
   const description = takeFlag(args, '--description');
+  const hasDescriptionFile = args.some(
+    (a) => a === '--description-file' || a.startsWith('--description-file='),
+  );
+  const descriptionFile = takeFlag(args, '--description-file');
   const assigneeRaw = takeFlag(args, '--assignee');
   const addLabelNames = takeAllFlags(args, '--label');
   const removeLabelNames = takeAllFlags(args, '--remove-label');
@@ -387,11 +416,22 @@ async function updateIssueCmd(
   );
   const teamRaw = takeFlag(args, '--team');
 
+  // --description-file (#28): resolve the guards + read BEFORE the
+  // nothing-to-update check below, so a lone blank `--description-file` is a
+  // flag error rather than a confusing "Nothing to update". Same shared
+  // helper as create — both flags passed, blank values, unreadable paths,
+  // and empty input all fail loud before any network request.
+  const descriptionInput = readDescriptionInput(
+    description,
+    hasDescriptionFile,
+    descriptionFile,
+  );
+
   if (
     !stateName &&
     !title &&
     priorityRaw === undefined &&
-    description === undefined &&
+    descriptionInput === undefined &&
     assigneeRaw === undefined &&
     addLabelNames.length === 0 &&
     removeLabelNames.length === 0 &&
@@ -399,7 +439,7 @@ async function updateIssueCmd(
     cycleRaw === undefined
   ) {
     throw new AxiError(
-      'Nothing to update — pass at least one of --state, --title, --priority, --description, --assignee, --label, --remove-label, --project, --cycle',
+      'Nothing to update — pass at least one of --state, --title, --priority, --description, --description-file, --assignee, --label, --remove-label, --project, --cycle',
       'VALIDATION_ERROR',
     );
   }
@@ -582,7 +622,7 @@ async function updateIssueCmd(
   // input.
   const hasPatch =
     title !== undefined ||
-    description !== undefined ||
+    descriptionInput !== undefined ||
     stateName !== undefined ||
     priority !== undefined ||
     assigneeId !== undefined ||
@@ -597,7 +637,7 @@ async function updateIssueCmd(
 
   const updated = await updateIssue(apiKey, existing.id, {
     title,
-    description,
+    description: descriptionInput,
     stateName,
     priority,
     assigneeId,
@@ -643,6 +683,73 @@ async function deleteIssueCmd(
   return renderOutput([
     `deleted: ${existing.identifier} "${existing.title}"`,
   ]);
+}
+
+/**
+ * Resolve the description input for create/update (#28): --description
+ * (inline) XOR --description-file (file path or "-" for stdin). Shared by
+ * both write paths so the guards stay identical, mirroring comment's
+ * --body/--body-file convention:
+ * - both flags passed → loud mutual-exclusion error
+ * - --description-file present but blank → loud flag-value error
+ * - the file (or stdin) is read up front (readDescriptionFile) so an
+ *   unreadable path or empty input fails loud before any network request
+ * Returns undefined when neither flag was passed (field omitted entirely).
+ */
+function readDescriptionInput(
+  description: string | undefined,
+  hasFile: boolean,
+  file: string | undefined,
+): string | undefined {
+  if (description !== undefined && hasFile) {
+    throw new AxiError(
+      'Pass only one of --description or --description-file',
+      'VALIDATION_ERROR',
+    );
+  }
+  if (hasFile && (file === undefined || file.trim() === '')) {
+    throw new AxiError(
+      '--description-file requires a value',
+      'VALIDATION_ERROR',
+      ['e.g. --description-file ./issue.md (or - to read stdin)'],
+    );
+  }
+  return hasFile ? readDescriptionFile(file!) : description;
+}
+
+/**
+ * Read description content for --description-file (#28): a UTF-8 file path,
+ * or "-" to read stdin to EOF (fd 0) — long markdown bodies without
+ * shell-quoting hazards. Mirrors comment's readBodyFile for the path case;
+ * stdin is the new capability here. `read` is injectable for tests; the
+ * default is readFileSync(utf-8), which accepts both a path and a numeric fd.
+ *
+ * Empty content is rejected loud: on update a silently-empty description
+ * would wipe the field (a destructive no-op, not silence).
+ */
+export function readDescriptionFile(
+  path: string,
+  read: (source: string | number) => string = (source) =>
+    readFileSync(source, 'utf-8'),
+): string {
+  let content: string;
+  try {
+    // "-" maps to fd 0; the same readFileSync call serves both cases.
+    content = read(path === '-' ? 0 : path);
+  } catch {
+    throw new AxiError(
+      `Could not read --description-file: ${path}`,
+      'VALIDATION_ERROR',
+    );
+  }
+  if (content.trim() === '') {
+    throw new AxiError(
+      `--description-file is empty: ${path}`,
+      'VALIDATION_ERROR',
+      ['Pass a non-empty UTF-8 file or pipe stdin ("-")'],
+    );
+  }
+  return content;
 }
 
 function parsePriority(raw: string): number {

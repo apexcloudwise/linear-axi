@@ -300,7 +300,7 @@ describe('issue view --full children', () => {
 describe('help documents the sub-issue flags (#26)', () => {
   it('lists --parent on create and the --full children listing', () => {
     expect(ISSUE_HELP).toContain(
-      '[--description "..."] [--label <name>...] [--project <name>] [--cycle <current|number>] [--parent <IDENTIFIER|UUID>]',
+      '[--description "..."] [--description-file <path>] [--label <name>...] [--project <name>] [--cycle <current|number>] [--parent <IDENTIFIER|UUID>]',
     );
     expect(ISSUE_HELP).toContain(
       '--parent <IDENTIFIER|UUID>   create: nest the new issue under this parent',
