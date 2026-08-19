@@ -4,9 +4,10 @@ import { DESCRIPTION, TOP_HELP } from './cli.js';
 // outcome-focused so it fires on "needs Linear" intents.
 export const SKILL_DESCRIPTION =
   'Operate Linear (linear.app) through the linear-axi CLI - list and view issues, ' +
-  'create, update, and delete issues, post comments, and list teams. Use whenever a task ' +
-  'touches Linear: triaging or filing issues, changing issue state, setting priority, ' +
-  'commenting, or discovering team keys via `teams`.';
+  'create, update, and delete issues, post comments, list teams, and list/filter projects. ' +
+  'Use whenever a task touches Linear: triaging or filing issues, changing issue state, setting priority, ' +
+  'commenting, discovering team keys via `teams`, or scoping work to a project via `projects` ' +
+  'and `issues --project`.';
 
 export const SKILL_AUTHOR = 'ApexCloudWise';
 
@@ -50,12 +51,12 @@ linear-axi authenticates with a Linear personal API key (https://linear.app/sett
 
 ## When to use
 
-Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing, or deleting issues; changing issue state or priority; commenting on issues; or discovering team keys.
+Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing, or deleting issues; changing issue state or priority; commenting on issues; discovering team keys; or listing projects and scoping issues to one with \`issues --project <name>\`.
 
 ## Workflow
 
 1. Run \`npx -y @apexcloudwise/linear-axi\` with no arguments for a dashboard - the current viewer and your started, assigned issues.
-2. Drill in command-first: \`issues\`, \`issue view <IDENTIFIER>\`, \`teams\`.
+2. Drill in command-first: \`issues\`, \`issue view <IDENTIFIER>\`, \`teams\`, \`projects\`.
 3. Identify issues by Linear identifier (e.g. \`LIN-123\`) or UUID.
 4. Create an issue with \`issue create --title "..." --team <KEY>\`; team keys come from \`teams\`.
 5. Change state with \`issue update <IDENTIFIER> --state "<name>"\`; pass the workflow state name exactly (e.g. \`"In Progress"\`).

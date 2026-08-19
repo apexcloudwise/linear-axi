@@ -81,6 +81,21 @@ export const ISSUE_DETAIL_FIELDS = `
   updatedAt
 `;
 
+/**
+ * Selection for the `projects` connection. We select `status { type }` rather
+ * than the deprecated `state` field (Project.state: "[DEPRECATED] Use
+ * project.status instead" per @linear/sdk): status.type is a ProjectStatusType
+ * enum yielding the same raw lowercase lifecycle values.
+ */
+export const PROJECT_LIST_FIELDS = `
+  id
+  name
+  status { type }
+  progress
+  lead { name }
+  targetDate
+`;
+
 export interface LinearIssue {
   id: string;
   identifier: string;
@@ -100,6 +115,22 @@ export interface LinearTeam {
   id: string;
   key: string;
   name: string;
+}
+
+/**
+ * A Linear project as returned by PROJECT_LIST_FIELDS. `status.type` carries
+ * the lifecycle state (backlog, planned, started, paused, completed,
+ * canceled); `progress` is a float 0-1; `targetDate` is a TimelessDate
+ * serialized as YYYY-MM-DD (null when unset). Field shapes verified against
+ * the generated types in @linear/sdk (Project, ProjectStatus).
+ */
+export interface LinearProject {
+  id: string;
+  name: string;
+  status?: { type: string } | null;
+  progress?: number;
+  lead?: { name: string } | null;
+  targetDate?: string | null;
 }
 
 export interface LinearViewer {
@@ -128,12 +159,75 @@ export async function fetchTeams(apiKey: string): Promise<LinearTeam[]> {
   return data.teams.nodes;
 }
 
+export interface ProjectListResult {
+  projects: LinearProject[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more projects
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface ProjectListPage {
+  nodes: LinearProject[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List workspace projects, most recently updated first, auto-paginated in
+ * PAGE_SIZE (50) batches like fetchIssues until `limit` is satisfied or the
+ * server reports no more pages.
+ */
+export async function fetchProjects(
+  apiKey: string,
+  limit = 100,
+): Promise<ProjectListResult> {
+  const query = `query Projects($first: Int!, $after: String) {
+    projects(first: $first, after: $after, orderBy: updatedAt) {
+      nodes { ${PROJECT_LIST_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+  const projects: LinearProject[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (projects.length < limit) {
+    const first = Math.min(limit - projects.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{ projects: ProjectListPage }>(
+      apiKey,
+      query,
+      variables,
+    );
+
+    projects.push(...data.projects.nodes);
+
+    hasMore = data.projects.pageInfo?.hasNextPage ?? false;
+    const nextCursor = data.projects.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues: stop on server exhaustion and on a
+    // non-advancing cursor or empty page that would otherwise spin forever.
+    if (!hasMore || nextCursor === undefined) break;
+    if (data.projects.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { projects: projects.slice(0, limit), hasMore };
+}
+
 export interface IssueListFilter {
   team?: string; // team key, e.g. "LIN"
   stateType?: string; // backlog | unstarted | started | completed | canceled | triage
   assigneeEmail?: string; // exact email (use viewer email for "me")
   assigneeName?: string; // exact display name
   labels?: string[]; // label names — matches issues carrying ANY of them
+  project?: string; // project name — exact match
   search?: string; // ranked full-text search term (Linear app search ranking)
 }
 
@@ -162,6 +256,7 @@ interface IssueListPage {
  *   labels:   { some: { name: { in: ["Bug", "Regression"] } } }
  *   state:    { type:  { eq: "started" } }
  *   team:     { key:   { eq: "LIN" } }
+ *   project:  { name:  { eq: "Mobile app" } }
  *
  * `labels` uses `some: { name: { in: [...] } }` — an issue matches when at
  * least one of its labels is in the list ("any of" semantics). Shape verified
@@ -203,6 +298,9 @@ export async function fetchIssues(
   }
   if (filter.stateType) {
     where.push(`state: { type: { eq: ${jsonStr(filter.stateType)} } }`);
+  }
+  if (filter.project) {
+    where.push(`project: { name: { eq: ${jsonStr(filter.project)} } }`);
   }
   if (filter.labels?.length) {
     where.push(`labels: { some: { name: { in: ${jsonStr(filter.labels)} } } }`);
@@ -466,6 +564,28 @@ export async function resolveTeamId(
     { key: teamKey.toUpperCase() },
   );
   return data.teams.nodes[0]?.id;
+}
+
+/**
+ * Resolve a project name (exact match) to its id. Mirrors resolveTeamId;
+ * currently exercised by tests and reserved for v0.3 write-side project
+ * assignment (e.g. issue create --project). ProjectFilter.name is a
+ * StringComparator with `eq` (verified against @linear/sdk).
+ */
+export async function resolveProjectId(
+  apiKey: string,
+  name: string,
+): Promise<string | undefined> {
+  const data = await linearRequest<{
+    projects: { nodes: Array<{ id: string; name: string }> };
+  }>(
+    apiKey,
+    `query ProjectByName($name: String!) {
+      projects(filter: { name: { eq: $name } }) { nodes { id name } }
+    }`,
+    { name },
+  );
+  return data.projects.nodes[0]?.id;
 }
 
 async function resolveLabelIds(

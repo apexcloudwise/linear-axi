@@ -15,7 +15,7 @@ import {
 } from '../toon.js';
 import { formatCountLine } from '../format.js';
 
-export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--search <text>] [--limit <n>]
+export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--project <name>] [--search <text>] [--limit <n>]
 	List Linear issues, most recently updated first (relevance-ranked when --search is given).
 
 flags:
@@ -23,6 +23,7 @@ flags:
   --state <type>     workflow state type: backlog, unstarted, started, completed, canceled, triage
   --assignee <name>  "me" for yourself, or a user name
   --label <name>     filter by label name; repeat to match ANY of the given labels (issues carrying at least one)
+  --project <name>   filter by project name (exact match; run \`linear-axi projects\` for names)
   --search <text>    full-text search (same ranking as Linear's app search); composable with the filters above
   --limit <n>        max issues to return (default 25, max 500; fetched in pages of 50)
 
@@ -31,6 +32,7 @@ examples:
   linear-axi issues --assignee me --state started
   linear-axi issues --team LIN --label bug
   linear-axi issues --label bug --label regression
+  linear-axi issues --project "Mobile app" --state started
   linear-axi issues --search "onboarding" --team LIN --state started
 `;
 
@@ -39,6 +41,7 @@ const KNOWN_FLAGS = [
   '--state',
   '--assignee',
   '--label',
+  '--project',
   '--search',
   '--limit',
 ];
@@ -77,6 +80,14 @@ export async function issuesCommand(
     // takeFlag returns undefined for a missing value; never silently drop a search.
     throw new AxiError('--search requires a value', 'VALIDATION_ERROR', [
       'e.g. --search "onboarding"',
+    ]);
+  }
+  const hasProject = args.some((a) => a === '--project' || a.startsWith('--project='));
+  const project = takeFlag(args, '--project');
+  if (hasProject && (project === undefined || project.trim() === '')) {
+    // Same guard as --search: a missing value must fail loud, not drop the filter.
+    throw new AxiError('--project requires a value', 'VALIDATION_ERROR', [
+      'e.g. --project "Mobile app"',
     ]);
   }
   const limitRaw = takeFlag(args, '--limit');
@@ -125,6 +136,7 @@ export async function issuesCommand(
   // Every repeated --label is applied: Linear matches issues carrying at
   // least one of the names ("any of" semantics, documented in --help).
   if (labels.length) filter.labels = labels;
+  if (project) filter.project = project;
   if (search !== undefined) filter.search = search;
 
   const { issues, hasMore } = await fetchIssues(apiKey, filter, limit);
@@ -156,6 +168,11 @@ export async function issuesCommand(
   }
   if (search !== undefined && issues.length === 0) {
     hints.push(`No matches for "${search}" — try a shorter term or drop a filter`);
+  }
+  if (project !== undefined && issues.length === 0) {
+    hints.push(
+      `No issues in project "${project}" — check the exact name with \`linear-axi projects\``,
+    );
   }
   blocks.push(renderHelp(hints));
 
