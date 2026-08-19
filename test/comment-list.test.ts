@@ -183,7 +183,7 @@ describe('comment list rendering', () => {
       apiKey: FAKE_KEY,
     });
 
-    expect(out).toContain('comments[3]{author,body,created}');
+    expect(out).toContain('comments[3]{id,author,body,created}');
     expect(out).toContain('newest comment');
     expect(out).toContain('middle comment');
     expect(out).toContain('oldest comment');
