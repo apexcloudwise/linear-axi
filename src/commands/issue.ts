@@ -14,6 +14,7 @@ import {
   getPositional,
 } from '../args.js';
 import { AxiError } from '../errors.js';
+import { parseFields, type ExtraFieldSpec } from '../fields.js';
 import {
   field,
   custom,
@@ -31,20 +32,24 @@ export const ISSUE_HELP = `usage: linear-axi issue <subcommand> [args]
 Manage Linear issues.
 
 subcommands:
-  view <IDENTIFIER|UUID>   show issue details (--full disables description truncation)
+  view <IDENTIFIER|UUID>   show issue details (--full disables description truncation; --fields <a,b,c> adds extra fields)
   create --title "..." --team <KEY> [--description "..."] [--label <name>...]
   update <ref> [--state <name>] [--title "..."] [--priority <0-4>] [--description "..."]
   delete <ref>
 
+view --fields names (opt-in, comma-separated): dueDate, estimate, archivedAt, branchName
+  default detail fields are untouched without the flag
+
 examples:
   linear-axi issue view LIN-123
   linear-axi issue view LIN-123 --full
+  linear-axi issue view LIN-123 --fields dueDate,estimate
   linear-axi issue create --title "Fix login" --team ENG --label bug
   linear-axi issue update LIN-123 --state "In Progress"
   linear-axi issue delete LIN-123
 `;
 
-const VIEW_FLAGS = ['--full'];
+const VIEW_FLAGS = ['--full', '--fields'];
 const CREATE_FLAGS = ['--title', '--team', '--description', '--label'];
 const UPDATE_FLAGS = ['--state', '--title', '--priority', '--description'];
 
@@ -61,6 +66,21 @@ const detailSchema: FieldDef[] = [
   relativeTime('createdAt', 'created'),
   relativeTime('updatedAt', 'updated'),
 ];
+
+/**
+ * Opt-in extra fields for `issue view --fields` (#23). Only fields NOT already
+ * in the default detail output are offered; each linearKey is a scalar on
+ * Linear's Issue type (verified against the generated types in @linear/sdk
+ * v90.0.0): dueDate (TimelessDate serialized YYYY-MM-DD, null when unset),
+ * estimate (Float, null when unset), archivedAt (DateTime, null when not
+ * archived), branchName (String).
+ */
+const VIEW_EXTRA_FIELDS: Record<string, ExtraFieldSpec> = {
+  dueDate: { linearKey: 'dueDate', def: field('dueDate') },
+  estimate: { linearKey: 'estimate', def: field('estimate') },
+  archivedAt: { linearKey: 'archivedAt', def: relativeTime('archivedAt', 'archived') },
+  branchName: { linearKey: 'branchName', def: field('branchName') },
+};
 
 export async function issueCommand(
   args: string[],
@@ -98,6 +118,12 @@ async function viewIssue(
   assertKnownFlags(args, VIEW_FLAGS);
   const apiKey = requireKey(ctx.apiKey);
   const full = takeBoolFlag(args, '--full');
+  // Opt-in extra fields (--fields): unknown names fail loud (parseFields)
+  // before any network request; a blank value selects nothing.
+  const { extraDefs, extraLinearKeys } = parseFields(
+    takeFlag(args, '--fields'),
+    VIEW_EXTRA_FIELDS,
+  );
   const refRaw = getPositional(args);
   if (!refRaw) {
     throw new AxiError('Missing issue reference', 'VALIDATION_ERROR', [
@@ -105,7 +131,7 @@ async function viewIssue(
     ]);
   }
 
-  const issue = await fetchIssue(apiKey, refRaw);
+  const issue = await fetchIssue(apiKey, refRaw, extraLinearKeys);
   if (!issue) {
     throw new AxiError(
       `Issue "${refRaw}" not found`,
@@ -114,7 +140,9 @@ async function viewIssue(
     );
   }
 
-  const blocks: string[] = [renderDetail('issue', issue, detailSchema)];
+  const blocks: string[] = [
+    renderDetail('issue', issue, [...detailSchema, ...extraDefs]),
+  ];
 
   // Description: truncated by default, full on --full (principle 3).
   const { preview, total, truncated } = truncateForDisplay(

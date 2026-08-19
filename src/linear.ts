@@ -82,6 +82,16 @@ export const ISSUE_DETAIL_FIELDS = `
 `;
 
 /**
+ * Append opt-in extra scalar keys (from `--fields`) to a base issue selection
+ * set. Returns the base string unchanged when no extras are requested, so the
+ * default GraphQL documents stay byte-identical without the flag (opt-in only).
+ */
+export function withExtraFields(base: string, extraKeys: string[]): string {
+  if (extraKeys.length === 0) return base;
+  return `${base}${extraKeys.map((k) => `\n  ${k}`).join('')}`;
+}
+
+/**
  * Selection for the `projects` connection. We select `status { type }` rather
  * than the deprecated `state` field (Project.state: "[DEPRECATED] Use
  * project.status instead" per @linear/sdk): status.type is a ProjectStatusType
@@ -123,6 +133,14 @@ export interface LinearIssue {
   url?: string;
   createdAt?: string;
   updatedAt?: string;
+  // Opt-in extra fields, present only when selected via --fields. Shapes
+  // verified against the generated Issue type in @linear/sdk v90.0.0:
+  // estimate is Float|null, dueDate a TimelessDate serialized as YYYY-MM-DD
+  // (null when unset), archivedAt an ISO DateTime, branchName a String.
+  estimate?: number | null;
+  dueDate?: string | null;
+  archivedAt?: string | null;
+  branchName?: string;
 }
 
 export interface LinearTeam {
@@ -413,11 +431,17 @@ interface IssueListPage {
  * There is no usable `totalCount` on the `issues` connection, so callers
  * compute the count line from the returned slice (`hasMore` in the result
  * says whether a truncation hint is warranted).
+ *
+ * `extraFields` is a list of opt-in extra scalar Issue keys (from `--fields`)
+ * appended to the node selection; the default document is used when empty.
+ * It applies to both the `issues` and the `searchIssues` (filter.search)
+ * documents — both return Issue nodes.
  */
 export async function fetchIssues(
   apiKey: string,
   filter: IssueListFilter,
   limit = 50,
+  extraFields: string[] = [],
 ): Promise<IssueListResult> {
   const where: string[] = [];
 
@@ -453,17 +477,18 @@ export async function fetchIssues(
 
   const filterPart = where.length ? `filter: { ${where.join(', ')} }, ` : '';
   const isSearch = filter.search !== undefined;
+  const selection = withExtraFields(ISSUE_LIST_FIELDS, extraFields);
 
   const query = isSearch
     ? `query SearchIssues($term: String!, $first: Int!, $after: String) {
         searchIssues(term: $term, ${filterPart}first: $first, after: $after) {
-          nodes { ${ISSUE_LIST_FIELDS} }
+          nodes { ${selection} }
           pageInfo { hasNextPage endCursor }
         }
       }`
     : `query Issues($first: Int!, $after: String) {
         issues(${filterPart}first: $first, after: $after, orderBy: updatedAt) {
-          nodes { ${ISSUE_LIST_FIELDS} }
+          nodes { ${selection} }
           pageInfo { hasNextPage endCursor }
         }
       }`;
@@ -508,14 +533,18 @@ export async function fetchIssues(
 /**
  * Fetch a single issue. Linear's `issue(id:)` accepts EITHER a UUID or the
  * human-readable identifier (e.g. "CTZ-311"), so no resolution step is needed.
+ *
+ * `extraFields` is a list of opt-in extra scalar Issue keys (from `--fields`)
+ * appended to the selection; the default document is used when empty.
  */
 export async function fetchIssue(
   apiKey: string,
   ref: string,
+  extraFields: string[] = [],
 ): Promise<LinearIssue | undefined> {
   const data = await linearRequest<{ issue: LinearIssue | null }>(
     apiKey,
-    `query Issue($id: String!) { issue(id: $id) { ${ISSUE_DETAIL_FIELDS} } }`,
+    `query Issue($id: String!) { issue(id: $id) { ${withExtraFields(ISSUE_DETAIL_FIELDS, extraFields)} } }`,
     { id: ref },
   );
   return data.issue ?? undefined;

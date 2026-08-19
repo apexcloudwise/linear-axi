@@ -3,6 +3,7 @@ import { requireKey } from '../config.js';
 import { fetchIssues, fetchViewer, type IssueListFilter } from '../linear.js';
 import { assertKnownFlags, takeFlag, takeAllFlags } from '../args.js';
 import { AxiError } from '../errors.js';
+import { parseFields, type ExtraFieldSpec } from '../fields.js';
 import {
   field,
   custom,
@@ -15,7 +16,7 @@ import {
 } from '../toon.js';
 import { formatCountLine } from '../format.js';
 
-export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--project <name>] [--cycle <current|number>] [--search <text>] [--limit <n>]
+export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--project <name>] [--cycle <current|number>] [--search <text>] [--fields <a,b,c>] [--limit <n>]
 	List Linear issues, most recently updated first (relevance-ranked when --search is given).
 
 flags:
@@ -26,6 +27,7 @@ flags:
   --project <name>   filter by project name (exact match; run \`linear-axi projects\` for names)
   --cycle <current|number> filter by cycle: "current" matches issues in any team's active cycle (with --team, just that team's); a cycle number requires --team because numbers restart per team (run \`linear-axi cycles\` for numbers)
   --search <text>    full-text search (same ranking as Linear's app search); composable with the filters above
+  --fields <a,b,c>   opt-in extra columns (comma-separated): url, estimate, dueDate, createdAt; default columns are untouched without this flag
   --limit <n>        max issues to return (default 25, max 500; fetched in pages of 50)
 
 examples:
@@ -36,6 +38,7 @@ examples:
   linear-axi issues --project "Mobile app" --state started
   linear-axi issues --cycle current --team LIN
   linear-axi issues --search "onboarding" --team LIN --state started
+  linear-axi issues --fields url,estimate
 `;
 
 const KNOWN_FLAGS = [
@@ -46,6 +49,7 @@ const KNOWN_FLAGS = [
   '--project',
   '--cycle',
   '--search',
+  '--fields',
   '--limit',
 ];
 
@@ -56,6 +60,20 @@ const listSchema: FieldDef[] = [
   pluck('team', 'key', 'team'),
   relativeTime('updatedAt', 'updated'),
 ];
+
+/**
+ * Opt-in extra columns for `issues --fields` (#23). Only fields NOT already in
+ * the default list output are offered; each linearKey is a scalar on Linear's
+ * Issue type (verified against the generated types in @linear/sdk v90.0.0):
+ * url (String), estimate (Float, null when unset), dueDate (TimelessDate
+ * serialized YYYY-MM-DD, null when unset), createdAt (DateTime).
+ */
+const ISSUE_LIST_EXTRA_FIELDS: Record<string, ExtraFieldSpec> = {
+  url: { linearKey: 'url', def: field('url') },
+  estimate: { linearKey: 'estimate', def: field('estimate') },
+  dueDate: { linearKey: 'dueDate', def: field('dueDate') },
+  createdAt: { linearKey: 'createdAt', def: relativeTime('createdAt', 'created') },
+};
 
 const STATE_TYPES = new Set([
   'backlog',
@@ -102,6 +120,13 @@ export async function issuesCommand(
   }
   const limitRaw = takeFlag(args, '--limit');
   const limit = limitRaw ? parseLimit(limitRaw) : 25;
+
+  // Opt-in extra columns (--fields): unknown names fail loud (parseFields)
+  // before any network request; a blank value selects nothing.
+  const { extraDefs, extraLinearKeys } = parseFields(
+    takeFlag(args, '--fields'),
+    ISSUE_LIST_EXTRA_FIELDS,
+  );
 
   if (stateType && !STATE_TYPES.has(stateType.toLowerCase())) {
     throw new AxiError(
@@ -177,13 +202,18 @@ export async function issuesCommand(
   if (cycleFilter !== undefined) filter.cycle = cycleFilter;
   if (search !== undefined) filter.search = search;
 
-  const { issues, hasMore } = await fetchIssues(apiKey, filter, limit);
+  const { issues, hasMore } = await fetchIssues(
+    apiKey,
+    filter,
+    limit,
+    extraLinearKeys,
+  );
 
   const blocks: string[] = [];
   blocks.push(formatCountLine({ count: issues.length, limit, hasMore }));
 
   if (issues.length) {
-    blocks.push(renderList('issues', issues, listSchema));
+    blocks.push(renderList('issues', issues, [...listSchema, ...extraDefs]));
   } else {
     blocks.push('issues: 0 found');
   }

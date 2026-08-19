@@ -51,5 +51,6 @@ Run `npx -y @apexcloudwise/linear-axi --help` for global flags, or `npx -y @apex
 - Mutations are idempotent: updating an issue to its current state, or deleting an already-deleted issue, is a reported no-op (exit 0).
 - Repeated `--label` flags match issues carrying ANY of the given labels; a missing or blank value is rejected, never dropped.
 - `issues --cycle current` lists every team's active-cycle issues (add `--team <KEY>` to narrow); `--cycle <number>` also requires `--team` because cycle numbers restart per team - find them with `cycles [--team <KEY>]`.
+- `issues --fields <a,b,c>` and `issue view <IDENTIFIER> --fields <a,b,c>` add opt-in extra fields (per-command sets - see each command's --help) when the default columns lack something you need.
 - `issue view` truncates the description by default; pass `--full` to see it entirely.
 - Issue references accept either a UUID or a `TEAM-NUMBER` identifier like `LIN-123`.
