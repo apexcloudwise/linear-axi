@@ -134,6 +134,7 @@ export interface IssueListFilter {
   assigneeEmail?: string; // exact email (use viewer email for "me")
   assigneeName?: string; // exact display name
   label?: string; // label name (at least one match)
+  search?: string; // ranked full-text search term (Linear app search ranking)
 }
 
 export interface IssueListResult {
@@ -148,6 +149,13 @@ export interface IssueListResult {
  *   labels:   { name:  { eq: "Bug" } }
  *   state:    { type:  { eq: "started" } }
  *   team:     { key:   { eq: "LIN" } }
+ *
+ * When `filter.search` is set, Linear's ranked full-text search is used
+ * instead (same ranking as the Linear app's search). We query `searchIssues`
+ * rather than the `issueSearch` root field: both accept the same
+ * `filter: IssueFilter` + `first: Int`, but Linear marks `issueSearch` as
+ * deprecated ("will be removed in the future — use searchIssues instead"),
+ * and its nodes carry the same fields as `Issue` for our selection set.
  *
  * There is no `totalCount` on Linear connections, so callers compute the count
  * line from the returned slice (with a truncation hint when `limit` is hit).
@@ -176,6 +184,23 @@ export async function fetchIssues(
   }
 
   const filterPart = where.length ? `filter: { ${where.join(', ')} }, ` : '';
+  const first = Math.min(limit, 50);
+
+  if (filter.search !== undefined) {
+    const data = await linearRequest<{
+      searchIssues: { nodes: LinearIssue[] };
+    }>(
+      apiKey,
+      `query SearchIssues($term: String!, $first: Int!) {
+        searchIssues(term: $term, ${filterPart}first: $first) {
+          nodes { ${ISSUE_LIST_FIELDS} }
+        }
+      }`,
+      { term: filter.search, first },
+    );
+    return { issues: data.searchIssues.nodes };
+  }
+
   const query = `query Issues($first: Int!) {
     issues(${filterPart}first: $first, orderBy: updatedAt) {
       nodes { ${ISSUE_LIST_FIELDS} }
@@ -185,7 +210,7 @@ export async function fetchIssues(
   const data = await linearRequest<{ issues: { nodes: LinearIssue[] } }>(
     apiKey,
     query,
-    { first: Math.min(limit, 50) },
+    { first },
   );
 
   return { issues: data.issues.nodes };

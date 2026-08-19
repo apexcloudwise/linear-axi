@@ -15,20 +15,22 @@ import {
 } from '../toon.js';
 import { formatCountLine } from '../format.js';
 
-export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--limit <n>]
-List Linear issues, most recently updated first.
+export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--search <text>] [--limit <n>]
+List Linear issues, most recently updated first (relevance-ranked when --search is given).
 
 flags:
   --team <KEY>       filter by team key (e.g. LIN)
   --state <type>     workflow state type: backlog, unstarted, started, completed, canceled, triage
   --assignee <name>  "me" for yourself, or a user name
   --label <name>     filter by label name (repeatable)
+  --search <text>    full-text search (same ranking as Linear's app search); composable with the filters above
   --limit <n>        max issues to return (default 25, capped at 50)
 
 examples:
   linear-axi issues
   linear-axi issues --assignee me --state started
   linear-axi issues --team LIN --label bug
+  linear-axi issues --search "onboarding" --team LIN --state started
 `;
 
 const KNOWN_FLAGS = [
@@ -36,6 +38,7 @@ const KNOWN_FLAGS = [
   '--state',
   '--assignee',
   '--label',
+  '--search',
   '--limit',
 ];
 
@@ -67,6 +70,14 @@ export async function issuesCommand(
   const stateType = takeFlag(args, '--state');
   const assignee = takeFlag(args, '--assignee');
   const labels = takeAllFlags(args, '--label');
+  const hasSearch = args.some((a) => a === '--search' || a.startsWith('--search='));
+  const search = takeFlag(args, '--search');
+  if (hasSearch && (search === undefined || search.trim() === '')) {
+    // takeFlag returns undefined for a missing value; never silently drop a search.
+    throw new AxiError('--search requires a value', 'VALIDATION_ERROR', [
+      'e.g. --search "onboarding"',
+    ]);
+  }
   const limitRaw = takeFlag(args, '--limit');
   const limit = limitRaw ? parseLimit(limitRaw) : 25;
 
@@ -112,6 +123,7 @@ export async function issuesCommand(
 
   // The API matches "at least one label"; pass the first label only for v1.
   if (labels.length) filter.label = labels[0];
+  if (search !== undefined) filter.search = search;
 
   const { issues } = await fetchIssues(apiKey, filter, limit);
 
@@ -139,6 +151,9 @@ export async function issuesCommand(
     hints.push(
       `Only the first label ("${labels[0]}") was applied — multi-label filter lands post-v1`,
     );
+  }
+  if (search !== undefined && issues.length === 0) {
+    hints.push(`No matches for "${search}" — try a shorter term or drop a filter`);
   }
   blocks.push(renderHelp(hints));
 
