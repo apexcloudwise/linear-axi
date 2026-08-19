@@ -70,8 +70,11 @@ export const ISSUE_LIST_FIELDS = `
  * Detail selection for a single issue. Label nodes include `id` because
  * `issue update --label/--remove-label` (#24) needs the issue's CURRENT label
  * ids to compute the union/difference replacement set — names alone cannot be
- * sent back to IssueUpdateInput.labelIds. Renderers read only `name`, so the
- * extra key is invisible in output.
+ * sent back to IssueUpdateInput.labelIds. `project { id name }` and
+ * `cycle { id number }` serve the same purpose for #25: update-side no-op
+ * detection compares the issue's CURRENT project/cycle ids against the
+ * resolved --project/--cycle ids before sending IssueUpdateInput.projectId/
+ * cycleId. Renderers read none of the extra keys, so they stay invisible.
  */
 export const ISSUE_DETAIL_FIELDS = `
   id
@@ -83,6 +86,8 @@ export const ISSUE_DETAIL_FIELDS = `
   assignee { name }
   team { key name id }
   labels { nodes { id name } }
+  project { id name }
+  cycle { id number }
   url
   createdAt
   updatedAt
@@ -139,6 +144,13 @@ export interface LinearIssue {
   // `id` is present when the selection includes it (ISSUE_DETAIL_FIELDS does;
   // ISSUE_LIST_FIELDS selects no labels at all), so it is optional here.
   labels?: { nodes: Array<{ id?: string; name: string }> } | null;
+  // Present when selected (ISSUE_DETAIL_FIELDS does, list selections do not):
+  // the issue's current project/cycle for #25 update no-op detection. Issue
+  // .project and .cycle are nullable object types per @linear/sdk (an issue
+  // can be in neither); `cycle.number` mirrors Cycle.number (Float, unique
+  // within its team).
+  project?: { id: string; name: string } | null;
+  cycle?: { id: string; number: number } | null;
   url?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -758,6 +770,18 @@ export interface IssueCreateInput {
   description?: string;
   teamKey: string;
   labelNames?: string[];
+  /**
+   * Put the issue in this project (resolved by the caller from --project via
+   * requireProjectId). IssueCreateInput.projectId is a nullable String
+   * ("The project associated with the issue", @linear/sdk v90).
+   */
+  projectId?: string;
+  /**
+   * Put the issue in this cycle (resolved by the caller from --cycle).
+   * IssueCreateInput.cycleId is a nullable String ("The cycle associated with
+   * the issue", @linear/sdk v90).
+   */
+  cycleId?: string;
 }
 
 export async function createIssue(
@@ -793,6 +817,18 @@ export async function createIssue(
     inputFields.push('labelIds: $labelIds');
     varDecls.push('$labelIds: [String!]');
     variables['labelIds'] = labelIds;
+  }
+  // projectId/cycleId (#25) follow the same omit-null convention: declared
+  // and sent only when the caller resolved an id.
+  if (input.projectId !== undefined) {
+    inputFields.push('projectId: $projectId');
+    varDecls.push('$projectId: String');
+    variables['projectId'] = input.projectId;
+  }
+  if (input.cycleId !== undefined) {
+    inputFields.push('cycleId: $cycleId');
+    varDecls.push('$cycleId: String');
+    variables['cycleId'] = input.cycleId;
   }
 
   const data = await linearRequest<{
@@ -834,6 +870,19 @@ export interface IssueUpdate {
    * means "leave labels alone".
    */
   labelIds?: string[];
+  /**
+   * Move the issue into this project (resolved by the caller from --project
+   * via requireProjectId). IssueUpdateInput.projectId is a nullable String
+   * ("The project associated with the issue", @linear/sdk v90); undefined
+   * leaves the project untouched.
+   */
+  projectId?: string;
+  /**
+   * Move the issue into this cycle (resolved by the caller from --cycle).
+   * IssueUpdateInput.cycleId is a nullable String ("The cycle associated
+   * with the issue", @linear/sdk v90); undefined leaves the cycle untouched.
+   */
+  cycleId?: string;
 }
 
 /**
@@ -891,6 +940,17 @@ export async function updateIssue(
     inputFields.push('labelIds: $labelIds');
     varDecls.push('$labelIds: [String!]');
     variables['labelIds'] = update.labelIds;
+  }
+  // projectId/cycleId (#25) follow the same omit-null convention as above.
+  if (update.projectId !== undefined) {
+    inputFields.push('projectId: $projectId');
+    varDecls.push('$projectId: String');
+    variables['projectId'] = update.projectId;
+  }
+  if (update.cycleId !== undefined) {
+    inputFields.push('cycleId: $cycleId');
+    varDecls.push('$cycleId: String');
+    variables['cycleId'] = update.cycleId;
   }
 
   const data = await linearRequest<{
@@ -988,6 +1048,105 @@ export async function resolveProjectId(
     { name },
   );
   return data.projects.nodes[0]?.id;
+}
+
+/**
+ * Write-path project resolution (#25): resolveProjectId, but LOUD on no match.
+ * Silently creating/updating an issue without its requested project would
+ * surprise far more than a failed command (AXI principle 6), so mutations
+ * follow resolveStateIdByName/resolveUserId's loud convention while the read
+ * path keeps resolveProjectId's silent-undefined semantics.
+ */
+export async function requireProjectId(
+  apiKey: string,
+  name: string,
+): Promise<string> {
+  const id = await resolveProjectId(apiKey, name);
+  if (!id) {
+    throw new AxiError(
+      `Project "${name}" not found in your workspace`,
+      'VALIDATION_ERROR',
+      ['Run `linear-axi projects` to see project names (exact match required)'],
+    );
+  }
+  return id;
+}
+
+/** An active cycle as returned by fetchActiveCycles. */
+export interface ActiveCycle {
+  id: string;
+  number: number;
+  /**
+   * Key of the team the cycle belongs to — Cycle.team is non-nullable
+   * ("The team that the cycle belongs to. Each cycle is scoped to exactly one
+   * team", @linear/sdk), so the workspace-wide query can attribute every
+   * active cycle to its team.
+   */
+  teamKey: string;
+}
+
+/**
+ * The active cycles of the workspace (or of one team) for write-side
+ * `--cycle current` resolution (#25). Uses the root `cycles` connection with
+ * `filter: CycleFilter` (QueryCyclesArgs in @linear/sdk v90): isActive is a
+ * BooleanComparator with eq (the same comparator the #21 read path puts in
+ * IssueFilter.cycle), and team is a TeamFilter, so `team: { key: { eq } }`
+ * scopes to one team — the same key comparator resolveTeamId relies on. One
+ * round trip either way; a team has at most one active cycle in practice, but
+ * callers decide what multiple matches mean (the workspace-wide form returns
+ * one per team with cycling enabled).
+ */
+export async function fetchActiveCycles(
+  apiKey: string,
+  teamKey?: string,
+): Promise<ActiveCycle[]> {
+  const perTeam = teamKey !== undefined;
+  const query = perTeam
+    ? `query TeamActiveCycles($teamKey: String!) {
+        cycles(filter: { isActive: { eq: true }, team: { key: { eq: $teamKey } } }) {
+          nodes { id number team { key } }
+        }
+      }`
+    : `query ActiveCycles {
+        cycles(filter: { isActive: { eq: true } }) { nodes { id number team { key } } }
+      }`;
+  const data = await linearRequest<{
+    cycles: {
+      nodes: Array<{ id: string; number: number; team: { key: string } }>;
+    };
+  }>(apiKey, query, perTeam ? { teamKey: teamKey.toUpperCase() } : {});
+  return data.cycles.nodes.map((n) => ({
+    id: n.id,
+    number: n.number,
+    teamKey: n.team.key,
+  }));
+}
+
+/**
+ * Resolve a team's cycle NUMBER to its id (#25 write path). Cycle numbers are
+ * "unique within its team" and restart per team (Cycle.number,
+ * @linear/sdk v90), so the team key is mandatory — the same disambiguation
+ * the #21 read path enforces. CycleFilter.number is a NumberComparator whose
+ * eq takes a Float. Returns undefined when the team has no cycle with that
+ * number (callers fail loud — a mutation must not silently skip the cycle).
+ */
+export async function resolveCycleIdByNumber(
+  apiKey: string,
+  teamKey: string,
+  number: number,
+): Promise<string | undefined> {
+  const data = await linearRequest<{
+    cycles: { nodes: Array<{ id: string }> };
+  }>(
+    apiKey,
+    `query CycleByNumber($number: Float!, $teamKey: String!) {
+      cycles(filter: { number: { eq: $number }, team: { key: { eq: $teamKey } } }) {
+        nodes { id }
+      }
+    }`,
+    { number, teamKey: teamKey.toUpperCase() },
+  );
+  return data.cycles.nodes[0]?.id;
 }
 
 /**

@@ -8,6 +8,9 @@ import {
   deleteIssue,
   resolveUserId,
   resolveLabelIds,
+  requireProjectId,
+  fetchActiveCycles,
+  resolveCycleIdByNumber,
 } from '../linear.js';
 import {
   assertKnownFlags,
@@ -36,9 +39,9 @@ Manage Linear issues.
 
 subcommands:
   view <IDENTIFIER|UUID>   show issue details (--full disables description truncation; --fields <a,b,c> adds extra fields)
-  create --title "..." --team <KEY> [--description "..."] [--label <name>...]
+  create --title "..." --team <KEY> [--description "..."] [--label <name>...] [--project <name>] [--cycle <current|number>]
   update <ref> [--state <name>] [--title "..."] [--priority <0-4>] [--description "..."]
-         [--assignee <name|me>] [--label <name>] [--remove-label <name>]
+         [--assignee <name|me>] [--label <name>] [--remove-label <name>] [--project <name>] [--cycle <current|number>]
   delete <ref>
 
 view --fields names (opt-in, comma-separated): dueDate, estimate, archivedAt, branchName
@@ -49,19 +52,37 @@ update flags:
   --label <name>           add a label (repeatable; names from \`linear-axi labels\`)
   --remove-label <name>    remove a label (repeatable); removing the last one clears labels
 
+project/cycle flags (create and update):
+  --project <name>         put the issue in a project (exact name; run \`linear-axi projects\`)
+  --cycle <current|number> put the issue in a cycle: "current" = the active cycle — with --team, that team's;
+                           without --team (update only), the workspace's single active one (fails if several teams have one);
+                           a cycle number always requires --team (numbers restart per team; run \`linear-axi cycles\`)
+  --team <KEY>             scopes --cycle; on create it is the issue's team, on update it must be the issue's own team
+
 examples:
   linear-axi issue view LIN-123
   linear-axi issue view LIN-123 --full
   linear-axi issue view LIN-123 --fields dueDate,estimate
   linear-axi issue create --title "Fix login" --team ENG --label bug
+  linear-axi issue create --title "Ship v2" --team LIN --project "Q3 launch" --cycle current
   linear-axi issue update LIN-123 --state "In Progress"
   linear-axi issue update LIN-123 --assignee me --label bug
   linear-axi issue update LIN-123 --remove-label bug
+  linear-axi issue update LIN-123 --project "Mobile app"
+  linear-axi issue update LIN-123 --cycle current
+  linear-axi issue update LIN-123 --cycle 3 --team LIN
   linear-axi issue delete LIN-123
 `;
 
 const VIEW_FLAGS = ['--full', '--fields'];
-const CREATE_FLAGS = ['--title', '--team', '--description', '--label'];
+const CREATE_FLAGS = [
+  '--title',
+  '--team',
+  '--description',
+  '--label',
+  '--project',
+  '--cycle',
+];
 const UPDATE_FLAGS = [
   '--state',
   '--title',
@@ -70,6 +91,9 @@ const UPDATE_FLAGS = [
   '--assignee',
   '--label',
   '--remove-label',
+  '--project',
+  '--cycle',
+  '--team',
 ];
 
 const detailSchema: FieldDef[] = [
@@ -199,6 +223,15 @@ async function createIssueCmd(
   const team = takeFlag(args, '--team');
   const description = takeFlag(args, '--description');
   const labels = takeAllFlags(args, '--label');
+  // has* detection must precede takeFlag (which removes the flag pair).
+  const hasProject = args.some(
+    (a) => a === '--project' || a.startsWith('--project='),
+  );
+  const projectName = takeFlag(args, '--project');
+  const hasCycle = args.some(
+    (a) => a === '--cycle' || a.startsWith('--cycle='),
+  );
+  const cycleRaw = takeFlag(args, '--cycle');
 
   if (!title || !title.trim()) {
     throw new AxiError('--title is required', 'VALIDATION_ERROR', [
@@ -211,11 +244,43 @@ async function createIssueCmd(
     ]);
   }
 
+  // Blank/missing --project/--cycle values fail loud before any network
+  // request (same guard shape as the `issues` read path).
+  if (hasProject && (projectName === undefined || projectName.trim() === '')) {
+    throw new AxiError('--project requires a value', 'VALIDATION_ERROR', [
+      'e.g. --project "Q3 launch"',
+    ]);
+  }
+  if (hasCycle && (cycleRaw === undefined || cycleRaw.trim() === '')) {
+    throw new AxiError('--cycle requires a value', 'VALIDATION_ERROR', [
+      'Use --cycle current for the active cycle, or --cycle <number> (per --team)',
+    ]);
+  }
+
+  // Resolve --project/--cycle to ids BEFORE the mutation (#25): a loud
+  // failure here beats an issue created without its requested project/cycle.
+  // On create --team is required, so every cycle lookup is team-scoped — no
+  // cross-team ambiguity exists on this path.
+  let projectId: string | undefined;
+  if (projectName) {
+    projectId = await requireProjectId(apiKey, projectName.trim());
+  }
+  let cycleId: string | undefined;
+  if (cycleRaw !== undefined) {
+    const spec = parseCycleValue(cycleRaw);
+    cycleId =
+      spec === 'current'
+        ? await requireActiveCycleId(apiKey, team.trim())
+        : await requireCycleIdByNumber(apiKey, team.trim(), spec);
+  }
+
   const issue = await createIssue(apiKey, {
     title: title.trim(),
     description,
     teamKey: team.trim(),
     labelNames: labels,
+    projectId,
+    cycleId,
   });
 
   const blocks: string[] = [
@@ -258,6 +323,19 @@ async function updateIssueCmd(
   const assigneeRaw = takeFlag(args, '--assignee');
   const addLabelNames = takeAllFlags(args, '--label');
   const removeLabelNames = takeAllFlags(args, '--remove-label');
+  // has* detection must precede takeFlag (which removes the flag pair).
+  const hasProject = args.some(
+    (a) => a === '--project' || a.startsWith('--project='),
+  );
+  const projectRaw = takeFlag(args, '--project');
+  const hasCycle = args.some(
+    (a) => a === '--cycle' || a.startsWith('--cycle='),
+  );
+  const cycleRaw = takeFlag(args, '--cycle');
+  const hasTeam = args.some(
+    (a) => a === '--team' || a.startsWith('--team='),
+  );
+  const teamRaw = takeFlag(args, '--team');
 
   if (
     !stateName &&
@@ -266,17 +344,64 @@ async function updateIssueCmd(
     description === undefined &&
     assigneeRaw === undefined &&
     addLabelNames.length === 0 &&
-    removeLabelNames.length === 0
+    removeLabelNames.length === 0 &&
+    projectRaw === undefined &&
+    cycleRaw === undefined
   ) {
     throw new AxiError(
-      'Nothing to update — pass at least one of --state, --title, --priority, --description, --assignee, --label, --remove-label',
+      'Nothing to update — pass at least one of --state, --title, --priority, --description, --assignee, --label, --remove-label, --project, --cycle',
       'VALIDATION_ERROR',
+    );
+  }
+
+  // Blank/missing values fail loud before any network request (same guard
+  // shape as the `issues` read path).
+  if (hasProject && (projectRaw === undefined || projectRaw.trim() === '')) {
+    throw new AxiError('--project requires a value', 'VALIDATION_ERROR', [
+      'e.g. --project "Q3 launch"',
+    ]);
+  }
+  if (hasCycle && (cycleRaw === undefined || cycleRaw.trim() === '')) {
+    throw new AxiError('--cycle requires a value', 'VALIDATION_ERROR', [
+      'Use --cycle current for the active cycle, or --cycle <number> --team <KEY>',
+    ]);
+  }
+  const teamKey = teamRaw?.trim();
+  if (hasTeam && !teamKey) {
+    throw new AxiError('--team requires a value', 'VALIDATION_ERROR');
+  }
+  // --team on update exists ONLY to scope --cycle resolution (moving an issue
+  // between teams is not supported) — reject it alone rather than silently
+  // dropping it (AXI principle 6).
+  if (teamKey && cycleRaw === undefined) {
+    throw new AxiError(
+      '--team on update only applies to --cycle resolution',
+      'VALIDATION_ERROR',
+      ['e.g. --cycle current --team LIN, or --cycle <number> --team <KEY>'],
     );
   }
 
   let priority: number | undefined;
   if (priorityRaw !== undefined) {
     priority = parsePriority(priorityRaw);
+  }
+
+  // Cycle spec parsing also happens before any network request so the
+  // numeric-without-team case fails loud exactly like the #21 read path
+  // (cycle numbers restart per team, so a bare number is ambiguous).
+  let cycleSpec: 'current' | number | undefined;
+  if (cycleRaw !== undefined) {
+    cycleSpec = parseCycleValue(cycleRaw);
+    if (cycleSpec !== 'current' && !teamKey) {
+      throw new AxiError(
+        '--cycle <number> requires --team (cycle numbers restart per team)',
+        'VALIDATION_ERROR',
+        [
+          `e.g. --cycle ${cycleSpec} --team LIN`,
+          'Or use --cycle current without --team',
+        ],
+      );
+    }
   }
 
   // Blank flag values fail loud before any network request (takeAllFlags
@@ -364,16 +489,56 @@ async function updateIssueCmd(
     }
   }
 
+  // Project (#25): resolve loud (requireProjectId — a silently missing project
+  // would surprise), then field-level no-op — requesting the project the issue
+  // already carries skips the field, exactly like a matching assignee above.
+  let projectId: string | undefined;
+  if (projectRaw !== undefined) {
+    const resolved = await requireProjectId(apiKey, projectRaw.trim());
+    if (existing.project?.id !== resolved) {
+      projectId = resolved;
+    }
+  }
+
+  // Cycle (#25): same field-level no-op against the issue's current cycle id.
+  // --team, when given, must be the issue's OWN team — resolving against
+  // another team would attach the issue to a foreign team's cycle.
+  let cycleId: string | undefined;
+  if (cycleSpec !== undefined) {
+    const issueTeamKey = existing.team?.key;
+    if (
+      teamKey &&
+      issueTeamKey &&
+      teamKey.toUpperCase() !== issueTeamKey.toUpperCase()
+    ) {
+      throw new AxiError(
+        `Issue ${existing.identifier} belongs to team ${issueTeamKey} — --team must match it for --cycle resolution`,
+        'VALIDATION_ERROR',
+        [`Drop --team, or use --team ${issueTeamKey}`],
+      );
+    }
+    const resolved =
+      cycleSpec === 'current'
+        ? await requireActiveCycleId(apiKey, teamKey, issueTeamKey)
+        : await requireCycleIdByNumber(apiKey, teamKey!, cycleSpec);
+    if (existing.cycle?.id !== resolved) {
+      cycleId = resolved;
+    }
+  }
+
   // Each field can individually be a no-op (a matching state short-circuits
-  // above; a matching assignee/label set is skipped). When NOTHING would be
-  // sent, report the no-op instead of mutating with an empty input.
+  // above; a matching assignee/label set/project/cycle is skipped). When
+  // NOTHING would be sent, report the no-op instead of mutating with an empty
+  // input.
   const hasPatch =
     title !== undefined ||
     description !== undefined ||
     stateName !== undefined ||
     priority !== undefined ||
     assigneeId !== undefined ||
-    labelIds !== undefined;
+    labelIds !== undefined ||
+    projectId !== undefined ||
+    cycleId !== undefined;
   if (!hasPatch) {
     return renderOutput([
       `issue: ${existing.identifier} already up to date (no-op)`,
@@ -387,6 +552,8 @@ async function updateIssueCmd(
     priority,
     assigneeId,
     labelIds,
+    projectId,
+    cycleId,
   });
 
   return renderOutput([
@@ -437,4 +604,94 @@ function parsePriority(raw: string): number {
     );
   }
   return n;
+}
+
+/**
+ * Parse a --cycle value: "current" (case-insensitive) or a positive integer
+ * cycle number. Same grammar as the `issues` read path (#21); anything else
+ * fails loud before any network request.
+ */
+function parseCycleValue(raw: string): 'current' | number {
+  const value = raw.trim().toLowerCase();
+  if (value === 'current') return 'current';
+  if (/^\d+$/.test(value) && Number(value) >= 1) return Number(value);
+  throw new AxiError(`Invalid --cycle: ${raw}`, 'VALIDATION_ERROR', [
+    'Use "current" for the active cycle, or a positive cycle number',
+  ]);
+}
+
+/**
+ * Resolve --cycle current to a cycle id (#25 write path). With teamKey (always
+ * on create, where --team is required; on update when passed): that team's
+ * active cycle. Without (update only): the workspace's active cycles — #21's
+ * read path lets "current" match every team's active cycle, but a WRITE must
+ * pick exactly one, so more than one active cycle fails loud listing the
+ * candidates instead of silently assigning a wrong team's cycle. When the
+ * target issue's team is known (update), a resolved cycle belonging to a
+ * DIFFERENT team is rejected for the same reason — an issue can only sit in
+ * one of its own team's cycles.
+ */
+async function requireActiveCycleId(
+  apiKey: string,
+  teamKey?: string,
+  issueTeamKey?: string,
+): Promise<string> {
+  const active = await fetchActiveCycles(apiKey, teamKey);
+  const scope = teamKey?.toUpperCase();
+  if (active.length === 0) {
+    throw new AxiError(
+      scope
+        ? `Team ${scope} has no active cycle`
+        : 'No active cycles in your workspace',
+      'VALIDATION_ERROR',
+      ['Run `linear-axi cycles` to see cycles'],
+    );
+  }
+  if (active.length > 1) {
+    const list = active
+      .map((c) => `cycle ${c.number} (${c.teamKey})`)
+      .join(', ');
+    throw new AxiError(
+      scope
+        ? `Team ${scope} has ${active.length} active cycles — pick one by number instead`
+        : `${active.length} active cycles in your workspace — pass --team <KEY> to pick one`,
+      'VALIDATION_ERROR',
+      [`Active cycles: ${list}`],
+    );
+  }
+  const match = active[0]!;
+  if (
+    issueTeamKey &&
+    match.teamKey.toUpperCase() !== issueTeamKey.toUpperCase()
+  ) {
+    throw new AxiError(
+      `The only active cycle is cycle ${match.number} of team ${match.teamKey}, but this issue belongs to team ${issueTeamKey}`,
+      'VALIDATION_ERROR',
+      [
+        `Use --cycle <number> --team ${issueTeamKey} to pick one of its own team's cycles`,
+      ],
+    );
+  }
+  return match.id;
+}
+
+/**
+ * Resolve a numbered --cycle to a cycle id, loud on no match (#25 write
+ * path). The team key is mandatory — cycle numbers restart per team (same
+ * disambiguation as the #21 read path).
+ */
+async function requireCycleIdByNumber(
+  apiKey: string,
+  teamKey: string,
+  number: number,
+): Promise<string> {
+  const id = await resolveCycleIdByNumber(apiKey, teamKey, number);
+  if (!id) {
+    throw new AxiError(
+      `Cycle ${number} not found for team ${teamKey.toUpperCase()}`,
+      'VALIDATION_ERROR',
+      [`Run \`linear-axi cycles --team ${teamKey.toUpperCase()}\` to see cycle numbers`],
+    );
+  }
+  return id;
 }
