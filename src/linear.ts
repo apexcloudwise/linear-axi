@@ -714,6 +714,36 @@ export async function fetchComments(
   return { comments: comments.slice(0, limit), hasMore };
 }
 
+/**
+ * A single comment fetched by id via fetchComment: the id plus just enough
+ * context for the write paths' confirmations — the parent issue's identifier
+ * (Comment.issue is nullable per @linear/sdk: "Null if the comment belongs to
+ * a different parent entity type", e.g. project comments).
+ */
+export interface LinearCommentRef {
+  id: string;
+  issue?: { identifier: string } | null;
+}
+
+/**
+ * Fetch one comment by id (#27). The root `comment(id:)` query exists in
+ * @linear/sdk v90 (QueryCommentArgs: { hash?: String, id?: String }, returns
+ * Maybe<Comment>) — like `issue(id:)`, a missing id resolves to null rather
+ * than an error, which is exactly what the delete path's idempotent no-op and
+ * the update path's loud NOT_FOUND branch on.
+ */
+export async function fetchComment(
+  apiKey: string,
+  id: string,
+): Promise<LinearCommentRef | undefined> {
+  const data = await linearRequest<{ comment: LinearCommentRef | null }>(
+    apiKey,
+    `query Comment($id: String!) { comment(id: $id) { id issue { identifier } } }`,
+    { id },
+  );
+  return data.comment ?? undefined;
+}
+
 /** Selection for label nodes. `color` is a raw HEX string (see LinearLabel). */
 export const LABEL_LIST_FIELDS = `
   id
@@ -1061,6 +1091,61 @@ export async function createComment(
   );
   if (!data.commentCreate.success) {
     throw new AxiError('Linear rejected the comment', 'UNKNOWN');
+  }
+}
+
+/**
+ * Update a comment's body (#27). Mutation shape verified against the generated
+ * documents in @linear/sdk v90 (UpdateCommentMutationVariables): the root
+ * mutation is `commentUpdate(id: String!, input: CommentUpdateInput, ...)`
+ * returning CommentPayload { comment, lastSyncId, success }. CommentUpdateInput
+ * exposes exactly one non-internal field — `body: String` ("The comment
+ * content") — so no omit-null input builder is needed: body is the single
+ * required value and is always sent.
+ */
+export async function updateComment(
+  apiKey: string,
+  id: string,
+  body: string,
+): Promise<void> {
+  const data = await linearRequest<{
+    commentUpdate: { success: boolean };
+  }>(
+    apiKey,
+    `mutation UpdateComment($id: String!, $body: String!) {
+      commentUpdate(id: $id, input: { body: $body }) {
+        success
+      }
+    }`,
+    { id, body },
+  );
+  if (!data.commentUpdate.success) {
+    throw new AxiError('Linear rejected the comment update', 'UNKNOWN');
+  }
+}
+
+/**
+ * Delete a comment (#27). Mutation shape verified against the generated
+ * documents in @linear/sdk v90 (DeleteCommentMutationVariables): the root
+ * mutation is `commentDelete(id: String!)` returning DeletePayload
+ * { entityId, lastSyncId, success } — success is the only field the CLI
+ * needs, mirroring deleteIssue.
+ */
+export async function deleteComment(
+  apiKey: string,
+  id: string,
+): Promise<void> {
+  const data = await linearRequest<{
+    commentDelete: { success: boolean };
+  }>(
+    apiKey,
+    `mutation DeleteComment($id: String!) {
+      commentDelete(id: $id) { success }
+    }`,
+    { id },
+  );
+  if (!data.commentDelete.success) {
+    throw new AxiError('Linear rejected the comment delete', 'UNKNOWN');
   }
 }
 
