@@ -557,7 +557,7 @@ describe('parity and guards (create and update)', () => {
 
   it('documents the flags and examples in help (both subcommands)', () => {
     expect(ISSUE_HELP).toContain(
-      'create --title "..." --team <KEY> [--description "..."] [--label <name>...] [--project <name>] [--cycle <current|number>]',
+      'create --title "..." --team <KEY> [--description "..."] [--description-file <path>] [--label <name>...] [--project <name>] [--cycle <current|number>]',
     );
     expect(ISSUE_HELP).toContain(
       '[--assignee <name|me>] [--label <name>] [--remove-label <name>] [--project <name>] [--cycle <current|number>]',
