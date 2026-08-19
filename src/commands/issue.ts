@@ -2,9 +2,12 @@ import type { LinearContext } from '../context.js';
 import { requireKey } from '../config.js';
 import {
   fetchIssue,
+  fetchViewer,
   createIssue,
   updateIssue,
   deleteIssue,
+  resolveUserId,
+  resolveLabelIds,
 } from '../linear.js';
 import {
   assertKnownFlags,
@@ -35,10 +38,16 @@ subcommands:
   view <IDENTIFIER|UUID>   show issue details (--full disables description truncation; --fields <a,b,c> adds extra fields)
   create --title "..." --team <KEY> [--description "..."] [--label <name>...]
   update <ref> [--state <name>] [--title "..."] [--priority <0-4>] [--description "..."]
+         [--assignee <name|me>] [--label <name>] [--remove-label <name>]
   delete <ref>
 
 view --fields names (opt-in, comma-separated): dueDate, estimate, archivedAt, branchName
   default detail fields are untouched without the flag
+
+update flags:
+  --assignee <name|me>     assign the issue; "me" is the authenticated viewer
+  --label <name>           add a label (repeatable; names from \`linear-axi labels\`)
+  --remove-label <name>    remove a label (repeatable); removing the last one clears labels
 
 examples:
   linear-axi issue view LIN-123
@@ -46,12 +55,22 @@ examples:
   linear-axi issue view LIN-123 --fields dueDate,estimate
   linear-axi issue create --title "Fix login" --team ENG --label bug
   linear-axi issue update LIN-123 --state "In Progress"
+  linear-axi issue update LIN-123 --assignee me --label bug
+  linear-axi issue update LIN-123 --remove-label bug
   linear-axi issue delete LIN-123
 `;
 
 const VIEW_FLAGS = ['--full', '--fields'];
 const CREATE_FLAGS = ['--title', '--team', '--description', '--label'];
-const UPDATE_FLAGS = ['--state', '--title', '--priority', '--description'];
+const UPDATE_FLAGS = [
+  '--state',
+  '--title',
+  '--priority',
+  '--description',
+  '--assignee',
+  '--label',
+  '--remove-label',
+];
 
 const detailSchema: FieldDef[] = [
   field('identifier'),
@@ -236,10 +255,21 @@ async function updateIssueCmd(
   const title = takeFlag(args, '--title');
   const priorityRaw = takeFlag(args, '--priority');
   const description = takeFlag(args, '--description');
+  const assigneeRaw = takeFlag(args, '--assignee');
+  const addLabelNames = takeAllFlags(args, '--label');
+  const removeLabelNames = takeAllFlags(args, '--remove-label');
 
-  if (!stateName && !title && priorityRaw === undefined && description === undefined) {
+  if (
+    !stateName &&
+    !title &&
+    priorityRaw === undefined &&
+    description === undefined &&
+    assigneeRaw === undefined &&
+    addLabelNames.length === 0 &&
+    removeLabelNames.length === 0
+  ) {
     throw new AxiError(
-      'Nothing to update — pass at least one of --state, --title, --priority, --description',
+      'Nothing to update — pass at least one of --state, --title, --priority, --description, --assignee, --label, --remove-label',
       'VALIDATION_ERROR',
     );
   }
@@ -247,6 +277,13 @@ async function updateIssueCmd(
   let priority: number | undefined;
   if (priorityRaw !== undefined) {
     priority = parsePriority(priorityRaw);
+  }
+
+  // Blank flag values fail loud before any network request (takeAllFlags
+  // already rejects blank --label/--remove-label the same way).
+  const assigneeName = assigneeRaw?.trim();
+  if (assigneeRaw !== undefined && !assigneeName) {
+    throw new AxiError('--assignee requires a value', 'VALIDATION_ERROR');
   }
 
   const existing = await fetchIssue(apiKey, refRaw);
@@ -264,11 +301,92 @@ async function updateIssueCmd(
     ]);
   }
 
+  // Assignee (#24): "me" resolves to the viewer — fetchViewer already
+  // returns the id the mutation needs, so no users() round trip. Any other
+  // value resolves through users(filter: { name: { eq } }) and fails loud on
+  // no match or an ambiguous display name. Requesting the current assignee
+  // is a field-level no-op (skipped, like a matching state above).
+  let assigneeId: string | undefined;
+  if (assigneeName) {
+    let resolvedId: string;
+    let resolvedName: string;
+    if (assigneeName.toLowerCase() === 'me') {
+      const viewer = await fetchViewer(apiKey).catch(() => null);
+      if (!viewer?.id) {
+        throw new AxiError(
+          'Could not resolve your Linear user for --assignee me',
+          'UNKNOWN',
+        );
+      }
+      resolvedId = viewer.id;
+      resolvedName = viewer.name;
+    } else {
+      resolvedId = await resolveUserId(apiKey, assigneeName);
+      resolvedName = assigneeName;
+    }
+    const currentAssignee = existing.assignee?.name;
+    if (
+      !currentAssignee ||
+      resolvedName.toLowerCase() !== currentAssignee.toLowerCase()
+    ) {
+      assigneeId = resolvedId;
+    }
+  }
+
+  // Labels (#24): Linear's labelIds REPLACES the whole set, so compute the
+  // final set here — the issue's current label ids (ISSUE_DETAIL_FIELDS
+  // selects labels { nodes { id name } }) minus names matched by
+  // --remove-label (case-insensitive, against the issue's own labels so an
+  // absent name is a harmless no-op), unioned with --label names resolved
+  // workspace-wide via resolveLabelIds. When the computed set equals the
+  // current one the field is skipped; when removal empties it, [] is sent
+  // explicitly (updateIssue) — removing the last label must work.
+  let labelIds: string[] | undefined;
+  if (addLabelNames.length > 0 || removeLabelNames.length > 0) {
+    const currentNodes = existing.labels?.nodes ?? [];
+    const currentIds = currentNodes
+      .map((n) => n.id)
+      .filter((id): id is string => id !== undefined);
+    const removeLower = removeLabelNames.map((n) => n.trim().toLowerCase());
+    const keptIds = currentNodes
+      .filter((n) => !removeLower.includes(n.name.toLowerCase()))
+      .map((n) => n.id)
+      .filter((id): id is string => id !== undefined);
+    const addIds = addLabelNames.length
+      ? await resolveLabelIds(apiKey, addLabelNames)
+      : [];
+    const nextIds = [...new Set([...keptIds, ...addIds])];
+    const unchanged =
+      nextIds.length === currentIds.length &&
+      nextIds.every((id) => currentIds.includes(id));
+    if (!unchanged) {
+      labelIds = nextIds;
+    }
+  }
+
+  // Each field can individually be a no-op (a matching state short-circuits
+  // above; a matching assignee/label set is skipped). When NOTHING would be
+  // sent, report the no-op instead of mutating with an empty input.
+  const hasPatch =
+    title !== undefined ||
+    description !== undefined ||
+    stateName !== undefined ||
+    priority !== undefined ||
+    assigneeId !== undefined ||
+    labelIds !== undefined;
+  if (!hasPatch) {
+    return renderOutput([
+      `issue: ${existing.identifier} already up to date (no-op)`,
+    ]);
+  }
+
   const updated = await updateIssue(apiKey, existing.id, {
     title,
     description,
     stateName,
     priority,
+    assigneeId,
+    labelIds,
   });
 
   return renderOutput([

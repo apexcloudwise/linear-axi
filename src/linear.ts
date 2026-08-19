@@ -66,6 +66,13 @@ export const ISSUE_LIST_FIELDS = `
   updatedAt
 `;
 
+/**
+ * Detail selection for a single issue. Label nodes include `id` because
+ * `issue update --label/--remove-label` (#24) needs the issue's CURRENT label
+ * ids to compute the union/difference replacement set — names alone cannot be
+ * sent back to IssueUpdateInput.labelIds. Renderers read only `name`, so the
+ * extra key is invisible in output.
+ */
 export const ISSUE_DETAIL_FIELDS = `
   id
   identifier
@@ -75,7 +82,7 @@ export const ISSUE_DETAIL_FIELDS = `
   priority
   assignee { name }
   team { key name id }
-  labels { nodes { name } }
+  labels { nodes { id name } }
   url
   createdAt
   updatedAt
@@ -129,7 +136,9 @@ export interface LinearIssue {
   priority?: number;
   assignee?: { name: string } | null;
   team?: { id?: string; key: string; name?: string } | null;
-  labels?: { nodes: Array<{ name: string }> } | null;
+  // `id` is present when the selection includes it (ISSUE_DETAIL_FIELDS does;
+  // ISSUE_LIST_FIELDS selects no labels at all), so it is optional here.
+  labels?: { nodes: Array<{ id?: string; name: string }> } | null;
   url?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -808,6 +817,21 @@ export interface IssueUpdate {
   description?: string;
   stateName?: string;
   priority?: number;
+  /**
+   * Assign the issue to this user id. Undefined leaves the assignee
+   * untouched; Linear's IssueUpdateInput.assigneeId is a nullable String
+   * ("The identifier of the user to assign the issue to", @linear/sdk v90).
+   */
+  assigneeId?: string;
+  /**
+   * FULL REPLACEMENT label-id set — Linear's IssueUpdateInput.labelIds
+   * replaces the issue's labels wholesale ("The identifiers of the issue
+   * labels associated with this ticket", @linear/sdk v90). Callers compute
+   * union/difference against the issue's current ids. An EMPTY ARRAY IS
+   * SENT EXPLICITLY (removing the last label must work); only undefined
+   * means "leave labels alone".
+   */
+  labelIds?: string[];
 }
 
 /**
@@ -851,6 +875,20 @@ export async function updateIssue(
     inputFields.push('stateId: $stateId');
     varDecls.push('$stateId: String');
     variables['stateId'] = stateId;
+  }
+  // assigneeId/labelIds follow the same omit-null convention as above, with
+  // one deliberate exception: labelIds === [] IS included — an explicit
+  // removal of the last label must reach Linear as an empty replacement set,
+  // not be skipped like a null optional.
+  if (update.assigneeId !== undefined) {
+    inputFields.push('assigneeId: $assigneeId');
+    varDecls.push('$assigneeId: String');
+    variables['assigneeId'] = update.assigneeId;
+  }
+  if (update.labelIds !== undefined) {
+    inputFields.push('labelIds: $labelIds');
+    varDecls.push('$labelIds: [String!]');
+    variables['labelIds'] = update.labelIds;
   }
 
   const data = await linearRequest<{
@@ -955,8 +993,9 @@ export async function resolveProjectId(
  * Reuses fetchLabels (auto-paginated) so label resolution keeps working in
  * workspaces with more than one page (50) of labels — the old inline query
  * here fetched a single unpaginated page and silently missed the rest.
+ * Unknown names are silently skipped (same semantics as issue create).
  */
-async function resolveLabelIds(
+export async function resolveLabelIds(
   apiKey: string,
   names: string[],
 ): Promise<string[]> {
@@ -965,6 +1004,52 @@ async function resolveLabelIds(
   return labels
     .filter((l) => wanted.includes(l.name.toLowerCase()))
     .map((l) => l.id);
+}
+
+/**
+ * Resolve a user's display name (exact match) to their id for
+ * `issue update --assignee <name>` (#24). Query shape verified against the
+ * generated documents in @linear/sdk v90: Query.users takes
+ * `filter: UserFilter` where UserFilter.name is a StringComparator with `eq`,
+ * and the User type exposes id (ID), name, email — all selected here.
+ *
+ * Fails loud on both no-match and multi-match (display names are not unique
+ * in Linear), listing the matched candidates like resolveStateIdByName lists
+ * available states.
+ */
+export async function resolveUserId(
+  apiKey: string,
+  name: string,
+): Promise<string> {
+  const data = await linearRequest<{
+    users: { nodes: Array<{ id: string; name: string; email: string }> };
+  }>(
+    apiKey,
+    `query UserByName($name: String!) {
+      users(filter: { name: { eq: $name } }) { nodes { id name email } }
+    }`,
+    { name },
+  );
+
+  const nodes = data.users.nodes;
+  if (nodes.length === 0) {
+    throw new AxiError(
+      `User "${name}" not found in your workspace`,
+      'VALIDATION_ERROR',
+      ['Use the exact display name, or "me" for yourself'],
+    );
+  }
+  if (nodes.length > 1) {
+    const candidates = nodes
+      .map((u) => `${u.name} <${u.email}>`)
+      .join(', ');
+    throw new AxiError(
+      `User "${name}" matches ${nodes.length} users`,
+      'VALIDATION_ERROR',
+      [`Candidates: ${candidates}`],
+    );
+  }
+  return nodes[0]!.id;
 }
 
 async function resolveStateIdByName(
