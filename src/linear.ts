@@ -550,6 +550,108 @@ export async function fetchIssue(
   return data.issue ?? undefined;
 }
 
+/** Selection for comment nodes. The author is `user` for workspace comments,
+ * `externalUser` for comments created through integrations (Slack, Intercom). */
+export const COMMENT_LIST_FIELDS = `
+  id
+  body
+  user { name }
+  externalUser { displayName }
+  createdAt
+`;
+
+/**
+ * A Linear comment as returned by COMMENT_LIST_FIELDS. Exactly one of
+ * user/externalUser is set for real comments (Comment.user is nullable:
+ * "null for comments created by integrations or bots without a user
+ * association" per @linear/sdk); both are absent in fixtures only.
+ */
+export interface LinearComment {
+  id: string;
+  body: string;
+  user?: { name: string } | null;
+  externalUser?: { displayName: string } | null;
+  createdAt: string;
+}
+
+export interface CommentListResult {
+  comments: LinearComment[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more comments
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface CommentListPage {
+  nodes: LinearComment[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List one issue's comments, newest first.
+ *
+ * The root `comments` connection has no `issueId` argument in current
+ * @linear/sdk (v90.0.0 QueryCommentsArgs: after/before/filter/first/
+ * includeArchived/last/orderBy) — the thread is scoped through
+ * `filter: { issue: { id: { eq: ... } } }` (CommentFilter.issue is a
+ * NullableIssueFilter; IssueFilter.id is an IssueIdComparator with eq: ID).
+ *
+ * Ordering: PaginationOrderBy only offers createdAt/updatedAt and Linear's
+ * connections sort descending (newest first — Linear's pagination docs and
+ * the repo's fetchIssues/fetchProjects/fetchCycles precedent; the
+ * Ascending/Descending PaginationSortOrder enum in the SDK is not an arg on
+ * this connection). `orderBy: createdAt` therefore returns the newest
+ * comment first without any client-side reversing, and stays the stable
+ * thread order (an edited old comment does not jump to the top, which
+ * `updatedAt` ordering would cause).
+ *
+ * Auto-paginates in PAGE_SIZE (50) batches like fetchIssues until `limit` is
+ * satisfied or the server reports no more pages.
+ */
+export async function fetchComments(
+  apiKey: string,
+  issueId: string,
+  limit = 100,
+): Promise<CommentListResult> {
+  const query = `query Comments($issueId: ID!, $first: Int!, $after: String) {
+    comments(filter: { issue: { id: { eq: $issueId } } }, first: $first, after: $after, orderBy: createdAt) {
+      nodes { ${COMMENT_LIST_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+  const comments: LinearComment[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (comments.length < limit) {
+    const first = Math.min(limit - comments.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = { issueId, first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{ comments: CommentListPage }>(
+      apiKey,
+      query,
+      variables,
+    );
+
+    comments.push(...data.comments.nodes);
+
+    hasMore = data.comments.pageInfo?.hasNextPage ?? false;
+    const nextCursor = data.comments.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues/fetchProjects/fetchCycles.
+    if (!hasMore || nextCursor === undefined) break;
+    if (data.comments.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { comments: comments.slice(0, limit), hasMore };
+}
+
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ examples:
   linear-axi issue create --title "Fix login" --team ENG --label bug
   linear-axi issue update LIN-123 --state "In Progress"
   linear-axi comment LIN-123 --body "Looks good"
+  linear-axi comment list LIN-123
   linear-axi teams
   linear-axi projects
   linear-axi cycles --team LIN

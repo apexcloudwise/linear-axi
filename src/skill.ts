@@ -4,9 +4,9 @@ import { DESCRIPTION, TOP_HELP } from './cli.js';
 // outcome-focused so it fires on "needs Linear" intents.
 export const SKILL_DESCRIPTION =
   'Operate Linear (linear.app) through the linear-axi CLI - list and view issues, ' +
-  'create, update, and delete issues, post comments, list teams, list/filter projects, and list cycles. ' +
+  'create, update, and delete issues, post comments and read comment threads, list teams, list/filter projects, and list cycles. ' +
   'Use whenever a task touches Linear: triaging or filing issues, changing issue state, setting priority, ' +
-  'commenting, discovering team keys via `teams`, scoping work to a project via `projects` ' +
+  'commenting or reading an issue discussion via `comment list`, discovering team keys via `teams`, scoping work to a project via `projects` ' +
   'and `issues --project`, or to a cycle via `cycles` and `issues --cycle`.';
 
 export const SKILL_AUTHOR = 'ApexCloudWise';
@@ -51,7 +51,7 @@ linear-axi authenticates with a Linear personal API key (https://linear.app/sett
 
 ## When to use
 
-Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing, or deleting issues; changing issue state or priority; commenting on issues; discovering team keys; listing projects and scoping issues to one with \`issues --project <name>\`; or listing a team's cycles and scoping issues to one with \`issues --cycle current|<number> --team <KEY>\`.
+Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing, or deleting issues; changing issue state or priority; commenting on issues or reading their comment threads; discovering team keys; listing projects and scoping issues to one with \`issues --project <name>\`; or listing a team's cycles and scoping issues to one with \`issues --cycle current|<number> --team <KEY>\`.
 
 ## Workflow
 
@@ -60,7 +60,7 @@ Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing
 3. Identify issues by Linear identifier (e.g. \`LIN-123\`) or UUID.
 4. Create an issue with \`issue create --title "..." --team <KEY>\`; team keys come from \`teams\`.
 5. Change state with \`issue update <IDENTIFIER> --state "<name>"\`; pass the workflow state name exactly (e.g. \`"In Progress"\`).
-6. Comment with \`comment <IDENTIFIER> --body "..."\` or \`--body-file <path>\` for multi-line bodies.
+6. Comment with \`comment <IDENTIFIER> --body "..."\` or \`--body-file <path>\` for multi-line bodies; read an issue's thread with \`comment list <IDENTIFIER>\` (newest first, \`--full\` for untruncated bodies).
 7. Every response ends with contextual next-step hints under \`help:\` - follow them.
 
 ## Commands
@@ -82,7 +82,7 @@ Run \`npx -y @apexcloudwise/linear-axi --help\` for global flags, or \`npx -y @a
 - Repeated \`--label\` flags match issues carrying ANY of the given labels; a missing or blank value is rejected, never dropped.
 - \`issues --cycle current\` lists every team's active-cycle issues (add \`--team <KEY>\` to narrow); \`--cycle <number>\` also requires \`--team\` because cycle numbers restart per team - find them with \`cycles [--team <KEY>]\`.
 - \`issues --fields <a,b,c>\` and \`issue view <IDENTIFIER> --fields <a,b,c>\` add opt-in extra fields (per-command sets - see each command's --help) when the default columns lack something you need.
-- \`issue view\` truncates the description by default; pass \`--full\` to see it entirely.
+- \`issue view\` truncates the description by default; pass \`--full\` to see it entirely. \`comment list\` likewise previews each comment body; \`--full\` shows them whole.
 - Issue references accept either a UUID or a \`TEAM-NUMBER\` identifier like \`LIN-123\`.
 `;
 }
