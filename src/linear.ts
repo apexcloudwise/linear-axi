@@ -133,12 +133,25 @@ export interface IssueListFilter {
   stateType?: string; // backlog | unstarted | started | completed | canceled | triage
   assigneeEmail?: string; // exact email (use viewer email for "me")
   assigneeName?: string; // exact display name
-  label?: string; // label name (at least one match)
+  labels?: string[]; // label names — matches issues carrying ANY of them
   search?: string; // ranked full-text search term (Linear app search ranking)
 }
 
 export interface IssueListResult {
   issues: LinearIssue[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more results
+   * exist beyond the returned slice (e.g. the `--limit` was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+/** Linear caps connection pages at 50; fetchIssues auto-paginates in this size. */
+const PAGE_SIZE = 50;
+
+interface IssueListPage {
+  nodes: LinearIssue[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
 }
 
 /**
@@ -146,19 +159,31 @@ export interface IssueListResult {
  *
  * Filter syntax follows Linear's documented comparators, e.g.
  *   assignee: { email: { eq: "x" } }
- *   labels:   { name:  { eq: "Bug" } }
+ *   labels:   { some: { name: { in: ["Bug", "Regression"] } } }
  *   state:    { type:  { eq: "started" } }
  *   team:     { key:   { eq: "LIN" } }
+ *
+ * `labels` uses `some: { name: { in: [...] } }` — an issue matches when at
+ * least one of its labels is in the list ("any of" semantics). Shape verified
+ * against the generated schema types in @linear/sdk: IssueFilter.labels is an
+ * IssueLabelCollectionFilter whose `some` takes an IssueLabelFilter with a
+ * `name` StringComparator exposing `in`.
+ *
+ * Results are auto-paginated: each request fetches up to PAGE_SIZE (50) nodes
+ * via `pageInfo { hasNextPage endCursor }` and follows the cursor until
+ * `limit` is satisfied or the server reports no more pages.
  *
  * When `filter.search` is set, Linear's ranked full-text search is used
  * instead (same ranking as the Linear app's search). We query `searchIssues`
  * rather than the `issueSearch` root field: both accept the same
- * `filter: IssueFilter` + `first: Int`, but Linear marks `issueSearch` as
- * deprecated ("will be removed in the future — use searchIssues instead"),
- * and its nodes carry the same fields as `Issue` for our selection set.
+ * `filter: IssueFilter` + `first`/`after` paging, but Linear marks
+ * `issueSearch` as deprecated ("will be removed in the future — use
+ * searchIssues instead"), and its nodes carry the same fields as `Issue` for
+ * our selection set.
  *
- * There is no `totalCount` on Linear connections, so callers compute the count
- * line from the returned slice (with a truncation hint when `limit` is hit).
+ * There is no usable `totalCount` on the `issues` connection, so callers
+ * compute the count line from the returned slice (`hasMore` in the result
+ * says whether a truncation hint is warranted).
  */
 export async function fetchIssues(
   apiKey: string,
@@ -179,41 +204,62 @@ export async function fetchIssues(
   if (filter.stateType) {
     where.push(`state: { type: { eq: ${jsonStr(filter.stateType)} } }`);
   }
-  if (filter.label) {
-    where.push(`labels: { name: { eq: ${jsonStr(filter.label)} } }`);
+  if (filter.labels?.length) {
+    where.push(`labels: { some: { name: { in: ${jsonStr(filter.labels)} } } }`);
   }
 
   const filterPart = where.length ? `filter: { ${where.join(', ')} }, ` : '';
-  const first = Math.min(limit, 50);
+  const isSearch = filter.search !== undefined;
 
-  if (filter.search !== undefined) {
-    const data = await linearRequest<{
-      searchIssues: { nodes: LinearIssue[] };
-    }>(
-      apiKey,
-      `query SearchIssues($term: String!, $first: Int!) {
-        searchIssues(term: $term, ${filterPart}first: $first) {
+  const query = isSearch
+    ? `query SearchIssues($term: String!, $first: Int!, $after: String) {
+        searchIssues(term: $term, ${filterPart}first: $first, after: $after) {
           nodes { ${ISSUE_LIST_FIELDS} }
+          pageInfo { hasNextPage endCursor }
         }
-      }`,
-      { term: filter.search, first },
-    );
-    return { issues: data.searchIssues.nodes };
+      }`
+    : `query Issues($first: Int!, $after: String) {
+        issues(${filterPart}first: $first, after: $after, orderBy: updatedAt) {
+          nodes { ${ISSUE_LIST_FIELDS} }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`;
+
+  const issues: LinearIssue[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  // Auto-paginate until `limit` is satisfied. Each page asks for only the
+  // remaining slots (capped at PAGE_SIZE) so we never over-fetch.
+  while (issues.length < limit) {
+    const first = Math.min(limit - issues.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = isSearch
+      ? { term: filter.search, first }
+      : { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{
+      issues?: IssueListPage;
+      searchIssues?: IssueListPage;
+    }>(apiKey, query, variables);
+
+    const conn = (isSearch ? data.searchIssues : data.issues) as IssueListPage;
+    issues.push(...conn.nodes);
+
+    hasMore = conn.pageInfo?.hasNextPage ?? false;
+    const nextCursor = conn.pageInfo?.endCursor ?? undefined;
+
+    // Stop when the server says we are done, and guard against a server that
+    // keeps hasNextPage true without a usable (present, advancing) cursor or
+    // without nodes — both would loop forever.
+    if (!hasMore || nextCursor === undefined) break;
+    if (conn.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
   }
 
-  const query = `query Issues($first: Int!) {
-    issues(${filterPart}first: $first, orderBy: updatedAt) {
-      nodes { ${ISSUE_LIST_FIELDS} }
-    }
-  }`;
-
-  const data = await linearRequest<{ issues: { nodes: LinearIssue[] } }>(
-    apiKey,
-    query,
-    { first },
-  );
-
-  return { issues: data.issues.nodes };
+  return { issues: issues.slice(0, limit), hasMore };
 }
 
 /**
@@ -471,6 +517,6 @@ async function resolveStateIdByName(
   return match.id;
 }
 
-function jsonStr(value: string): string {
+function jsonStr(value: string | string[]): string {
   return JSON.stringify(value);
 }

@@ -78,7 +78,7 @@ Run \`npx -y @apexcloudwise/linear-axi --help\` for global flags, or \`npx -y @a
 
 - Output is TOON-encoded and token-efficient; pipe through grep/head only when a list is very long.
 - Mutations are idempotent: updating an issue to its current state, or deleting an already-deleted issue, is a reported no-op (exit 0).
-- Repeated flags (\`--label\`) apply once per value; a missing or blank value is rejected, never dropped.
+- Repeated \`--label\` flags match issues carrying ANY of the given labels; a missing or blank value is rejected, never dropped.
 - \`issue view\` truncates the description by default; pass \`--full\` to see it entirely.
 - Issue references accept either a UUID or a \`TEAM-NUMBER\` identifier like \`LIN-123\`.
 `;

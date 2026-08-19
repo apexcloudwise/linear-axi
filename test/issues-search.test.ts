@@ -89,14 +89,14 @@ describe('fetchIssues search dispatch', () => {
 
     await fetchIssues(
       FAKE_KEY,
-      { search: 'x', team: 'lin', stateType: 'started', label: 'bug' },
+      { search: 'x', team: 'lin', stateType: 'started', labels: ['bug'] },
       10,
     );
 
     const query = requests[0].body.query;
     expect(query).toContain('searchIssues(');
     expect(query).toContain(
-      'filter: { team: { key: { eq: "LIN" } }, state: { type: { eq: "started" } }, labels: { name: { eq: "bug" } } }',
+      'filter: { team: { key: { eq: "LIN" } }, state: { type: { eq: "started" } }, labels: { some: { name: { in: ["bug"] } } } }',
     );
     expect(requests[0].body.variables).toEqual({ term: 'x', first: 10 });
   });

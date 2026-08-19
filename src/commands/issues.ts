@@ -16,20 +16,21 @@ import {
 import { formatCountLine } from '../format.js';
 
 export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--search <text>] [--limit <n>]
-List Linear issues, most recently updated first (relevance-ranked when --search is given).
+	List Linear issues, most recently updated first (relevance-ranked when --search is given).
 
 flags:
   --team <KEY>       filter by team key (e.g. LIN)
   --state <type>     workflow state type: backlog, unstarted, started, completed, canceled, triage
   --assignee <name>  "me" for yourself, or a user name
-  --label <name>     filter by label name (repeatable)
+  --label <name>     filter by label name; repeat to match ANY of the given labels (issues carrying at least one)
   --search <text>    full-text search (same ranking as Linear's app search); composable with the filters above
-  --limit <n>        max issues to return (default 25, capped at 50)
+  --limit <n>        max issues to return (default 25, max 500; fetched in pages of 50)
 
 examples:
   linear-axi issues
   linear-axi issues --assignee me --state started
   linear-axi issues --team LIN --label bug
+  linear-axi issues --label bug --label regression
   linear-axi issues --search "onboarding" --team LIN --state started
 `;
 
@@ -121,14 +122,15 @@ export async function issuesCommand(
     }
   }
 
-  // The API matches "at least one label"; pass the first label only for v1.
-  if (labels.length) filter.label = labels[0];
+  // Every repeated --label is applied: Linear matches issues carrying at
+  // least one of the names ("any of" semantics, documented in --help).
+  if (labels.length) filter.labels = labels;
   if (search !== undefined) filter.search = search;
 
-  const { issues } = await fetchIssues(apiKey, filter, limit);
+  const { issues, hasMore } = await fetchIssues(apiKey, filter, limit);
 
   const blocks: string[] = [];
-  blocks.push(formatCountLine({ count: issues.length, limit }));
+  blocks.push(formatCountLine({ count: issues.length, limit, hasMore }));
 
   if (issues.length) {
     blocks.push(renderList('issues', issues, listSchema));
@@ -147,9 +149,9 @@ export async function issuesCommand(
       'Run `linear-axi issue create --title "..." --team <KEY>` to create one',
     );
   }
-  if (labels.length > 1) {
+  if (labels.length > 1 && issues.length === 0) {
     hints.push(
-      `Only the first label ("${labels[0]}") was applied — multi-label filter lands post-v1`,
+      `No issues carry any of: ${labels.join(', ')} — try fewer labels`,
     );
   }
   if (search !== undefined && issues.length === 0) {
@@ -160,10 +162,22 @@ export async function issuesCommand(
   return renderOutput(blocks);
 }
 
+/** Hard ceiling for --limit. Issues are auto-paginated in 50-size batches up to this. */
+const MAX_LIMIT = 500;
+
 function parseLimit(raw: string): number {
   const n = parseInt(raw, 10);
   if (isNaN(n) || n < 1) {
     throw new AxiError(`Invalid --limit: ${raw}`, 'VALIDATION_ERROR');
   }
-  return Math.min(n, 50);
+  // Loud failure over silent clamping (AXI principle 6): a caller asking for
+  // 501 should learn the real ceiling, not get 500 back unawares.
+  if (n > MAX_LIMIT) {
+    throw new AxiError(
+      `Invalid --limit: ${raw} (max ${MAX_LIMIT})`,
+      'VALIDATION_ERROR',
+      ['Results are fetched in pages of 50; the total is capped for token safety.'],
+    );
+  }
+  return n;
 }
