@@ -1,5 +1,6 @@
 import type { LinearContext } from '../context.js';
 import { requireKey } from '../config.js';
+import type { LinearIssueChild } from '../linear.js';
 import {
   fetchIssue,
   fetchViewer,
@@ -38,8 +39,8 @@ export const ISSUE_HELP = `usage: linear-axi issue <subcommand> [args]
 Manage Linear issues.
 
 subcommands:
-  view <IDENTIFIER|UUID>   show issue details (--full disables description truncation; --fields <a,b,c> adds extra fields)
-  create --title "..." --team <KEY> [--description "..."] [--label <name>...] [--project <name>] [--cycle <current|number>]
+  view <IDENTIFIER|UUID>   show issue details (--full shows the full description and sub-issues; --fields <a,b,c> adds extra fields)
+  create --title "..." --team <KEY> [--description "..."] [--label <name>...] [--project <name>] [--cycle <current|number>] [--parent <IDENTIFIER|UUID>]
   update <ref> [--state <name>] [--title "..."] [--priority <0-4>] [--description "..."]
          [--assignee <name|me>] [--label <name>] [--remove-label <name>] [--project <name>] [--cycle <current|number>]
   delete <ref>
@@ -51,6 +52,11 @@ update flags:
   --assignee <name|me>     assign the issue; "me" is the authenticated viewer
   --label <name>           add a label (repeatable; names from \`linear-axi labels\`)
   --remove-label <name>    remove a label (repeatable); removing the last one clears labels
+
+sub-issue flags:
+  --parent <IDENTIFIER|UUID>   create: nest the new issue under this parent (fails loud if not found;
+                               cross-team parents are allowed — the hierarchy spans teams)
+  --full (view)                also lists the issue's children, one "identifier | title | state" line each
 
 project/cycle flags (create and update):
   --project <name>         put the issue in a project (exact name; run \`linear-axi projects\`)
@@ -65,6 +71,7 @@ examples:
   linear-axi issue view LIN-123 --fields dueDate,estimate
   linear-axi issue create --title "Fix login" --team ENG --label bug
   linear-axi issue create --title "Ship v2" --team LIN --project "Q3 launch" --cycle current
+  linear-axi issue create --title "Wire the toggle" --team ENG --parent LIN-42
   linear-axi issue update LIN-123 --state "In Progress"
   linear-axi issue update LIN-123 --assignee me --label bug
   linear-axi issue update LIN-123 --remove-label bug
@@ -82,6 +89,7 @@ const CREATE_FLAGS = [
   '--label',
   '--project',
   '--cycle',
+  '--parent',
 ];
 const UPDATE_FLAGS = [
   '--state',
@@ -174,7 +182,7 @@ async function viewIssue(
     ]);
   }
 
-  const issue = await fetchIssue(apiKey, refRaw, extraLinearKeys);
+  const issue = await fetchIssue(apiKey, refRaw, extraLinearKeys, full);
   if (!issue) {
     throw new AxiError(
       `Issue "${refRaw}" not found`,
@@ -200,6 +208,15 @@ async function viewIssue(
           ? `description:\n${preview}\n  ... (truncated, ${total} chars total)\nhelp[1]:\n  Run \`linear-axi issue view ${issue.identifier} --full\` for the full description`
           : `description:\n${preview}`,
     );
+  }
+
+  // Sub-issues (#26): the children connection was selected (under --full) —
+  // render it after the description. Manual block rather than renderList: one
+  // `identifier | title | state` line per child is a third of the tokens of a
+  // TOON array-of-objects while carrying exactly the three fields issue #26's
+  // acceptance names.
+  if (full) {
+    blocks.push(renderSubIssues(issue.children));
   }
 
   blocks.push(
@@ -232,6 +249,10 @@ async function createIssueCmd(
     (a) => a === '--cycle' || a.startsWith('--cycle='),
   );
   const cycleRaw = takeFlag(args, '--cycle');
+  const hasParent = args.some(
+    (a) => a === '--parent' || a.startsWith('--parent='),
+  );
+  const parentRaw = takeFlag(args, '--parent');
 
   if (!title || !title.trim()) {
     throw new AxiError('--title is required', 'VALIDATION_ERROR', [
@@ -256,6 +277,11 @@ async function createIssueCmd(
       'Use --cycle current for the active cycle, or --cycle <number> (per --team)',
     ]);
   }
+  if (hasParent && (parentRaw === undefined || parentRaw.trim() === '')) {
+    throw new AxiError('--parent requires a value', 'VALIDATION_ERROR', [
+      'e.g. --parent LIN-42 (identifier or UUID of the parent issue)',
+    ]);
+  }
 
   // Resolve --project/--cycle to ids BEFORE the mutation (#25): a loud
   // failure here beats an issue created without its requested project/cycle.
@@ -274,6 +300,29 @@ async function createIssueCmd(
         : await requireCycleIdByNumber(apiKey, team.trim(), spec);
   }
 
+  // Sub-issue parent (#26): resolve --parent to the parent issue's ID BEFORE
+  // the mutation, the same resolve-loud-before-write convention as
+  // --project/--cycle. Linear's IssueCreateInput.parentId would also accept
+  // the raw identifier ("Can be a UUID or issue identifier (e.g., 'LIN-123')",
+  // @linear/sdk v90), but pre-resolving turns an unknown parent into a clean
+  // NOT_FOUND instead of an opaque mutation error. Cross-team parents are
+  // deliberately NOT rejected client-side — Linear's sub-issue hierarchy
+  // spans teams (a child may live in a different team than its parent), so
+  // any genuine workspace-level rejection surfaces through the normal API
+  // error mapping.
+  let parentId: string | undefined;
+  if (parentRaw !== undefined) {
+    const parent = await fetchIssue(apiKey, parentRaw.trim());
+    if (!parent) {
+      throw new AxiError(
+        `Parent issue "${parentRaw.trim()}" not found`,
+        'NOT_FOUND',
+        ['Run `linear-axi issues` to list issues'],
+      );
+    }
+    parentId = parent.id;
+  }
+
   const issue = await createIssue(apiKey, {
     title: title.trim(),
     description,
@@ -281,6 +330,7 @@ async function createIssueCmd(
     labelNames: labels,
     projectId,
     cycleId,
+    parentId,
   });
 
   const blocks: string[] = [
@@ -604,6 +654,25 @@ function parsePriority(raw: string): number {
     );
   }
   return n;
+}
+
+/**
+ * Render the sub-issues block for `issue view --full` (#26): a count header
+ * (the help[N]:-style bracket convention) plus one
+ * `identifier | title | state` line per child, in the server's order for the
+ * children connection. An empty list still renders the bare header — under
+ * --full the user asked for everything, so "no sub-issues" is information,
+ * not noise.
+ */
+function renderSubIssues(
+  children: { nodes: LinearIssueChild[] } | null | undefined,
+): string {
+  const nodes = children?.nodes ?? [];
+  const lines = nodes.map(
+    (child) =>
+      `  ${child.identifier} | ${child.title} | ${child.state?.name ?? 'unknown'}`,
+  );
+  return `sub-issues[${nodes.length}]:${lines.length ? `\n${lines.join('\n')}` : ''}`;
 }
 
 /**

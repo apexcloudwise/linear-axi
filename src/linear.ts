@@ -75,6 +75,8 @@ export const ISSUE_LIST_FIELDS = `
  * detection compares the issue's CURRENT project/cycle ids against the
  * resolved --project/--cycle ids before sending IssueUpdateInput.projectId/
  * cycleId. Renderers read none of the extra keys, so they stay invisible.
+ * The sub-issue children connection is NOT part of this base selection — it
+ * rides along via ISSUE_CHILDREN_FIELDS only for `issue view --full` (#26).
  */
 export const ISSUE_DETAIL_FIELDS = `
   id
@@ -102,6 +104,20 @@ export function withExtraFields(base: string, extraKeys: string[]): string {
   if (extraKeys.length === 0) return base;
   return `${base}${extraKeys.map((k) => `\n  ${k}`).join('')}`;
 }
+
+/**
+ * Sub-issue (children) selection for `issue view --full` (#26). Linear's
+ * Issue type exposes its sub-issues as `children: IssueConnection`
+ * ("Children of the issue", @linear/sdk v90 — the field is named `children`,
+ * not `subIssues`); IssueConnection carries `nodes: Array<Issue>`. One detail
+ * row per child needs identifier, title, and the workflow state's display
+ * name. Appended to ISSUE_DETAIL_FIELDS only when --full requests it, so the
+ * default detail document stays byte-identical (same opt-in principle as
+ * withExtraFields).
+ */
+export const ISSUE_CHILDREN_FIELDS = `
+  children { nodes { identifier title state { name } } }
+`;
 
 /**
  * Selection for the `projects` connection. We select `status { type }` rather
@@ -132,6 +148,18 @@ export const CYCLE_LIST_FIELDS = `
   progress
 `;
 
+/**
+ * A sub-issue child row as returned by ISSUE_CHILDREN_FIELDS (#26): the
+ * subset of Issue fields one `issue view --full` child line renders. Shapes
+ * match the generated Issue type in @linear/sdk v90 (identifier/title are
+ * non-nullable Strings; state is the issue's WorkflowState).
+ */
+export interface LinearIssueChild {
+  identifier: string;
+  title: string;
+  state?: { name: string } | null;
+}
+
 export interface LinearIssue {
   id: string;
   identifier: string;
@@ -151,6 +179,9 @@ export interface LinearIssue {
   // within its team).
   project?: { id: string; name: string } | null;
   cycle?: { id: string; number: number } | null;
+  // Present when selected via ISSUE_CHILDREN_FIELDS (issue view --full only,
+  // #26): the issue's sub-issues ("children" connection, server order).
+  children?: { nodes: LinearIssueChild[] } | null;
   url?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -557,15 +588,25 @@ export async function fetchIssues(
  *
  * `extraFields` is a list of opt-in extra scalar Issue keys (from `--fields`)
  * appended to the selection; the default document is used when empty.
+ *
+ * `includeChildren` (#26) additionally appends ISSUE_CHILDREN_FIELDS so
+ * `issue view --full` can list the issue's sub-issues. Opt-in for the same
+ * reason as the scalar extras: every update/delete/state-resolution caller
+ * shares this query and would otherwise carry (and pay for) a children page
+ * it never reads.
  */
 export async function fetchIssue(
   apiKey: string,
   ref: string,
   extraFields: string[] = [],
+  includeChildren = false,
 ): Promise<LinearIssue | undefined> {
+  const selection = includeChildren
+    ? `${withExtraFields(ISSUE_DETAIL_FIELDS, extraFields)}${ISSUE_CHILDREN_FIELDS}`
+    : withExtraFields(ISSUE_DETAIL_FIELDS, extraFields);
   const data = await linearRequest<{ issue: LinearIssue | null }>(
     apiKey,
-    `query Issue($id: String!) { issue(id: $id) { ${withExtraFields(ISSUE_DETAIL_FIELDS, extraFields)} } }`,
+    `query Issue($id: String!) { issue(id: $id) { ${selection} } }`,
     { id: ref },
   );
   return data.issue ?? undefined;
@@ -782,6 +823,15 @@ export interface IssueCreateInput {
    * the issue", @linear/sdk v90).
    */
   cycleId?: string;
+  /**
+   * Create the issue as a sub-issue of this parent (resolved by the caller
+   * from --parent via fetchIssue). IssueCreateInput.parentId is a nullable
+   * String ("The identifier of the parent issue. Can be a UUID or issue
+   * identifier (e.g., 'LIN-123')", @linear/sdk v90) — verified as the
+   * mechanism for #26: the generated SDK types expose NO subIssueCreate
+   * mutation, sub-issues are created through issueCreate + parentId.
+   */
+  parentId?: string;
 }
 
 export async function createIssue(
@@ -829,6 +879,12 @@ export async function createIssue(
     inputFields.push('cycleId: $cycleId');
     varDecls.push('$cycleId: String');
     variables['cycleId'] = input.cycleId;
+  }
+  // parentId (#26) follows the same omit-null convention as above.
+  if (input.parentId !== undefined) {
+    inputFields.push('parentId: $parentId');
+    varDecls.push('$parentId: String');
+    variables['parentId'] = input.parentId;
   }
 
   const data = await linearRequest<{

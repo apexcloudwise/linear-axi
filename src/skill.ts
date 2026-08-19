@@ -4,8 +4,9 @@ import { DESCRIPTION, TOP_HELP } from './cli.js';
 // outcome-focused so it fires on "needs Linear" intents.
 export const SKILL_DESCRIPTION =
   'Operate Linear (linear.app) through the linear-axi CLI - list and view issues, ' +
-  'create, update, and delete issues, post comments and read comment threads, list teams, list/filter projects, list cycles, and list labels. ' +
+  'create, update, and delete issues, nest work as sub-issues, post comments and read comment threads, list teams, list/filter projects, list cycles, and list labels. ' +
   'Use whenever a task touches Linear: triaging or filing issues, changing issue state, setting priority, assigning issues or managing their labels, ' +
+  'breaking an issue into sub-issues with `issue create --parent` and reading them back with `issue view --full`, ' +
   'commenting on or reading an issue discussion via `comment list`, discovering team keys via `teams`, scoping work to a project via `projects` ' +
   'and `issues --project`, to a cycle via `cycles` and `issues --cycle`, assigning issues to a project or cycle with `issue create/update ' +
   '--project <name>` and `--cycle current|<number>`, or finding label names via `labels` for `issue create --label`, ' +
@@ -53,14 +54,14 @@ linear-axi authenticates with a Linear personal API key (https://linear.app/sett
 
 ## When to use
 
-Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing, or deleting issues; changing issue state, priority, assignee, or labels; commenting on issues or reading their comment threads; discovering team keys; listing projects and scoping issues to one with \`issues --project <name>\`; listing a team's cycles and scoping issues to one with \`issues --cycle current|<number> --team <KEY>\`; putting issues in a project or cycle with \`issue create/update --project <name>\` or \`--cycle current|<number>\`; or listing the workspace's labels and using their names with \`issues --label <name>\`, \`issue create --label <name>\`, or \`issue update --label <name>\`.
+Use linear-axi whenever a task touches Linear: listing, viewing, filing, editing, or deleting issues; changing issue state, priority, assignee, or labels; nesting issues as sub-issues with \`issue create --parent <ref>\`; commenting on issues or reading their comment threads; discovering team keys; listing projects and scoping issues to one with \`issues --project <name>\`; listing a team's cycles and scoping issues to one with \`issues --cycle current|<number> --team <KEY>\`; putting issues in a project or cycle with \`issue create/update --project <name>\` or \`--cycle current|<number>\`; or listing the workspace's labels and using their names with \`issues --label <name>\`, \`issue create --label <name>\`, or \`issue update --label <name>\`.
 
 ## Workflow
 
 1. Run \`npx -y @apexcloudwise/linear-axi\` with no arguments for a dashboard - the current viewer and your started, assigned issues.
 2. Drill in command-first: \`issues\`, \`issue view <IDENTIFIER>\`, \`teams\`, \`projects\`, \`cycles\`, \`labels\`.
 3. Identify issues by Linear identifier (e.g. \`LIN-123\`) or UUID.
-4. Create an issue with \`issue create --title "..." --team <KEY>\`; team keys come from \`teams\`, and \`--project "<name>"\` / \`--cycle current|<number>\` land it in a project or cycle straight away.
+4. Create an issue with \`issue create --title "..." --team <KEY>\`; team keys come from \`teams\`, \`--project "<name>"\` / \`--cycle current|<number>\` land it in a project or cycle straight away, and \`--parent LIN-123\` nests it as a sub-issue.
 5. Change state with \`issue update <IDENTIFIER> --state "<name>"\`; pass the workflow state name exactly (e.g. \`"In Progress"\`). Assign with \`--assignee <name|me>\`, manage labels with \`--label <name>\` / \`--remove-label <name>\` (repeatable), and move it into a project or cycle with \`--project "<name>"\` / \`--cycle current|<number>\` in the same command.
 6. Comment with \`comment <IDENTIFIER> --body "..."\` or \`--body-file <path>\` for multi-line bodies; read an issue's thread with \`comment list <IDENTIFIER>\` (newest first, \`--full\` for untruncated bodies).
 7. Every response ends with contextual next-step hints under \`help:\` - follow them.
@@ -86,7 +87,8 @@ Run \`npx -y @apexcloudwise/linear-axi --help\` for global flags, or \`npx -y @a
 - \`issue create/update --project <name>\` matches the project name exactly (\`projects\` lists them) and fails loud on a miss; re-requesting the issue's current project or cycle is a reported no-op. On \`--cycle\`, "current" resolves the active cycle (scoped to \`--team\`'s when given; on update without \`--team\`, the workspace's single active one - ambiguous if several teams have one) while a cycle number always requires \`--team\` because numbers restart per team (\`cycles\` lists them).
 - \`issues --cycle current\` lists every team's active-cycle issues (add \`--team <KEY>\` to narrow); \`--cycle <number>\` also requires \`--team\` because cycle numbers restart per team - find them with \`cycles [--team <KEY>]\`.
 - \`issues --fields <a,b,c>\` and \`issue view <IDENTIFIER> --fields <a,b,c>\` add opt-in extra fields (per-command sets - see each command's --help) when the default columns lack something you need.
-- \`issue view\` truncates the description by default; pass \`--full\` to see it entirely. \`comment list\` likewise previews each comment body; \`--full\` shows them whole.
+- \`issue view\` truncates the description by default; pass \`--full\` to see it entirely and list the issue's sub-issues (one \`identifier | title | state\` line each). \`comment list\` likewise previews each comment body; \`--full\` shows them whole.
+- \`issue create --parent <IDENTIFIER|UUID>\` creates a sub-issue under the referenced parent (fails loud when the parent is not found; the parent may belong to another team - Linear's hierarchy spans teams).
 - Issue references accept either a UUID or a \`TEAM-NUMBER\` identifier like \`LIN-123\`.
 `;
 }
