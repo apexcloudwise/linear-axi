@@ -15,7 +15,7 @@ import {
 } from '../toon.js';
 import { formatCountLine } from '../format.js';
 
-export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--project <name>] [--search <text>] [--limit <n>]
+export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--project <name>] [--cycle <current|number>] [--search <text>] [--limit <n>]
 	List Linear issues, most recently updated first (relevance-ranked when --search is given).
 
 flags:
@@ -24,6 +24,7 @@ flags:
   --assignee <name>  "me" for yourself, or a user name
   --label <name>     filter by label name; repeat to match ANY of the given labels (issues carrying at least one)
   --project <name>   filter by project name (exact match; run \`linear-axi projects\` for names)
+  --cycle <current|number> filter by cycle: "current" matches issues in any team's active cycle (with --team, just that team's); a cycle number requires --team because numbers restart per team (run \`linear-axi cycles\` for numbers)
   --search <text>    full-text search (same ranking as Linear's app search); composable with the filters above
   --limit <n>        max issues to return (default 25, max 500; fetched in pages of 50)
 
@@ -33,6 +34,7 @@ examples:
   linear-axi issues --team LIN --label bug
   linear-axi issues --label bug --label regression
   linear-axi issues --project "Mobile app" --state started
+  linear-axi issues --cycle current --team LIN
   linear-axi issues --search "onboarding" --team LIN --state started
 `;
 
@@ -42,6 +44,7 @@ const KNOWN_FLAGS = [
   '--assignee',
   '--label',
   '--project',
+  '--cycle',
   '--search',
   '--limit',
 ];
@@ -90,6 +93,13 @@ export async function issuesCommand(
       'e.g. --project "Mobile app"',
     ]);
   }
+  const hasCycle = args.some((a) => a === '--cycle' || a.startsWith('--cycle='));
+  const cycle = takeFlag(args, '--cycle');
+  if (hasCycle && (cycle === undefined || cycle.trim() === '')) {
+    throw new AxiError('--cycle requires a value', 'VALIDATION_ERROR', [
+      'Use --cycle current for the active cycle, or --cycle <number> --team <KEY>',
+    ]);
+  }
   const limitRaw = takeFlag(args, '--limit');
   const limit = limitRaw ? parseLimit(limitRaw) : 25;
 
@@ -101,6 +111,33 @@ export async function issuesCommand(
         `Valid types: ${[...STATE_TYPES].join(', ')}`,
       ],
     );
+  }
+
+  // "current" filters to the active cycle(s); a number is a per-team cycle
+  // number and is ambiguous without --team (cycle 42 exists once per team),
+  // so the bare-number form fails loud instead of guessing a team.
+  let cycleFilter: 'current' | number | undefined;
+  if (cycle !== undefined) {
+    const value = cycle.trim().toLowerCase();
+    if (value === 'current') {
+      cycleFilter = 'current';
+    } else if (/^\d+$/.test(value) && Number(value) >= 1) {
+      if (team === undefined) {
+        throw new AxiError(
+          `--cycle <number> requires --team (cycle numbers restart per team)`,
+          'VALIDATION_ERROR',
+          [
+            `e.g. --cycle ${value} --team LIN`,
+            'Or use --cycle current without --team for every team\'s active cycle',
+          ],
+        );
+      }
+      cycleFilter = Number(value);
+    } else {
+      throw new AxiError(`Invalid --cycle: ${cycle}`, 'VALIDATION_ERROR', [
+        'Use "current" for the active cycle, or a positive cycle number with --team',
+      ]);
+    }
   }
 
   if (args.some((a) => !a.startsWith('--') && a !== '')) {
@@ -137,6 +174,7 @@ export async function issuesCommand(
   // least one of the names ("any of" semantics, documented in --help).
   if (labels.length) filter.labels = labels;
   if (project) filter.project = project;
+  if (cycleFilter !== undefined) filter.cycle = cycleFilter;
   if (search !== undefined) filter.search = search;
 
   const { issues, hasMore } = await fetchIssues(apiKey, filter, limit);
@@ -172,6 +210,13 @@ export async function issuesCommand(
   if (project !== undefined && issues.length === 0) {
     hints.push(
       `No issues in project "${project}" — check the exact name with \`linear-axi projects\``,
+    );
+  }
+  if (cycleFilter !== undefined && issues.length === 0) {
+    hints.push(
+      cycleFilter === 'current'
+        ? 'No issues in an active cycle — run `linear-axi cycles` to see cycles'
+        : `No issues in cycle ${cycleFilter} — run \`linear-axi cycles --team ${team}\` to see the team's cycles`,
     );
   }
   blocks.push(renderHelp(hints));

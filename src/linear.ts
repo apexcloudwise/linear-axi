@@ -96,6 +96,20 @@ export const PROJECT_LIST_FIELDS = `
   targetDate
 `;
 
+/**
+ * Selection for cycle nodes. Only the fields the `cycles` command renders:
+ * number (per-team identifier), the date range, and progress. The team key is
+ * added by the caller when fetching the root `cycles` connection (cycles from
+ * all teams are mixed there and need attribution).
+ */
+export const CYCLE_LIST_FIELDS = `
+  id
+  number
+  startsAt
+  endsAt
+  progress
+`;
+
 export interface LinearIssue {
   id: string;
   identifier: string;
@@ -131,6 +145,25 @@ export interface LinearProject {
   progress?: number;
   lead?: { name: string } | null;
   targetDate?: string | null;
+}
+
+/**
+ * A Linear cycle as returned by CYCLE_LIST_FIELDS. Cycles are a team's
+ * time-boxed iterations: `number` is auto-incrementing and unique within its
+ * team (it restarts per team — cycle 42 of LIN and cycle 42 of ENG are
+ * different cycles); `progress` is a float 0-1 ("(completed estimate points +
+ * 0.25 * in-progress estimate points) / total estimate points", 0 when nothing
+ * is estimated); `startsAt`/`endsAt` are ISO DateTimes. Field shapes verified
+ * against the generated types in @linear/sdk (Cycle).
+ */
+export interface LinearCycle {
+  id: string;
+  number: number;
+  startsAt: string;
+  endsAt: string;
+  progress?: number;
+  /** Present when fetched via the root `cycles` connection (absent per-team). */
+  team?: { key: string } | null;
 }
 
 export interface LinearViewer {
@@ -221,6 +254,104 @@ export async function fetchProjects(
   return { projects: projects.slice(0, limit), hasMore };
 }
 
+export interface CycleListResult {
+  cycles: LinearCycle[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more cycles
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface CycleListPage {
+  nodes: LinearCycle[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List recent cycles, most recently updated first, auto-paginated in PAGE_SIZE
+ * (50) batches like fetchProjects until `limit` is satisfied or the server
+ * reports no more pages.
+ *
+ * With `teamKey`, the team is resolved to its id (resolveTeamId) and its
+ * `team(id:) { cycles }` connection is queried. Without, the root `cycles`
+ * connection ("all cycles accessible to the user") is queried and each node
+ * also selects `team { key }` so mixed-team rows can be attributed — one
+ * request instead of one per team. Both connections take the same args
+ * (filter/first/after/orderBy: PaginationOrderBy) per @linear/sdk
+ * (TeamCyclesArgs, QueryCyclesArgs); PaginationOrderBy only offers
+ * createdAt/updatedAt, so updatedAt is the recent-first ordering, matching
+ * issues and projects.
+ *
+ * An unknown team key fails loud rather than silently returning nothing.
+ */
+export async function fetchCycles(
+  apiKey: string,
+  teamKey?: string,
+  limit = 10,
+): Promise<CycleListResult> {
+  let teamId: string | undefined;
+  if (teamKey !== undefined) {
+    teamId = await resolveTeamId(apiKey, teamKey);
+    if (!teamId) {
+      throw new AxiError(
+        `Team "${teamKey}" not found in your workspace`,
+        'VALIDATION_ERROR',
+        ['Run `linear-axi teams` to see available team keys'],
+      );
+    }
+  }
+
+  const perTeam = teamId !== undefined;
+  const query = perTeam
+    ? `query TeamCycles($id: String!, $first: Int!, $after: String) {
+        team(id: $id) {
+          cycles(first: $first, after: $after, orderBy: updatedAt) {
+            nodes { ${CYCLE_LIST_FIELDS} }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }`
+    : `query Cycles($first: Int!, $after: String) {
+        cycles(first: $first, after: $after, orderBy: updatedAt) {
+          nodes { ${CYCLE_LIST_FIELDS} team { key } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`;
+
+  const cycles: LinearCycle[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (cycles.length < limit) {
+    const first = Math.min(limit - cycles.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = perTeam
+      ? { id: teamId, first }
+      : { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{
+      team?: { cycles?: CycleListPage } | null;
+      cycles?: CycleListPage;
+    }>(apiKey, query, variables);
+
+    const conn = (perTeam ? data.team?.cycles : data.cycles) as CycleListPage;
+    cycles.push(...conn.nodes);
+
+    hasMore = conn.pageInfo?.hasNextPage ?? false;
+    const nextCursor = conn.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues/fetchProjects.
+    if (!hasMore || nextCursor === undefined) break;
+    if (conn.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { cycles: cycles.slice(0, limit), hasMore };
+}
+
 export interface IssueListFilter {
   team?: string; // team key, e.g. "LIN"
   stateType?: string; // backlog | unstarted | started | completed | canceled | triage
@@ -228,6 +359,7 @@ export interface IssueListFilter {
   assigneeName?: string; // exact display name
   labels?: string[]; // label names — matches issues carrying ANY of them
   project?: string; // project name — exact match
+  cycle?: 'current' | number; // 'current' = any team's active cycle; a number is per-team (compose with team)
   search?: string; // ranked full-text search term (Linear app search ranking)
 }
 
@@ -257,6 +389,8 @@ interface IssueListPage {
  *   state:    { type:  { eq: "started" } }
  *   team:     { key:   { eq: "LIN" } }
  *   project:  { name:  { eq: "Mobile app" } }
+ *   cycle:    { isActive: { eq: true } }   // the active cycle(s)
+ *   cycle:    { number:  { eq: 42 } }      // a per-team cycle number
  *
  * `labels` uses `some: { name: { in: [...] } }` — an issue matches when at
  * least one of its labels is in the list ("any of" semantics). Shape verified
@@ -304,6 +438,17 @@ export async function fetchIssues(
   }
   if (filter.labels?.length) {
     where.push(`labels: { some: { name: { in: ${jsonStr(filter.labels)} } } }`);
+  }
+  if (filter.cycle !== undefined) {
+    // IssueFilter.cycle is a NullableCycleFilter (verified against the
+    // generated types in @linear/sdk): isActive is a BooleanComparator
+    // (eq/neq) and number is a NumberComparator with eq, so both shapes below
+    // are schema-valid — no cycle-id resolution round trip is needed.
+    where.push(
+      filter.cycle === 'current'
+        ? `cycle: { isActive: { eq: true } }`
+        : `cycle: { number: { eq: ${filter.cycle} } }`,
+    );
   }
 
   const filterPart = where.length ? `filter: { ${where.join(', ')} }, ` : '';
