@@ -55,7 +55,10 @@ export function mapLinearError(result: LinearQueryResult): AxiError {
     );
   }
 
-  if (status === 429) {
+  if (
+    status === 429 ||
+    gqlErrors.some((error) => error.extensions?.code === 'RATELIMITED')
+  ) {
     return new AxiError('Linear rate limit hit — wait and retry', 'RATE_LIMITED', [
       'Wait ~60s before retrying',
     ]);

@@ -180,6 +180,26 @@ describe('projects command', () => {
     expect(hasMore).toBe(false);
   });
 
+  it('renders the truncation count when the project limit is reached', async () => {
+    const projects = Array.from({ length: 50 }, (_, i) =>
+      projectNode({ id: `pr-${i}`, name: `Project ${i}` }),
+    );
+    let page = 0;
+    stubLinearFetch(() => {
+      page += 1;
+      return {
+        projects: {
+          nodes: projects,
+          pageInfo: { hasNextPage: true, endCursor: `cursor-${page}` },
+        },
+      };
+    });
+
+    const out = await projectsCommand([], { apiKey: FAKE_KEY });
+
+    expect(out).toContain('count: 100 (showing first 100)');
+  });
+
   it('documents state values and percent progress in --help', () => {
     expect(PROJECTS_HELP).toContain(
       'backlog, planned, started, paused, completed, canceled',
@@ -193,6 +213,12 @@ describe('projects command', () => {
     await expect(
       projectsCommand(['--bogus'], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/unknown flag --bogus/);
+  });
+
+  it('rejects positional arguments loudly', async () => {
+    await expect(projectsCommand(['extra'], { apiKey: FAKE_KEY })).rejects.toThrow(
+      /Unexpected argument: extra/,
+    );
   });
 });
 
@@ -257,6 +283,9 @@ describe('issues --project filter', () => {
 
     await expect(
       issuesCommand(['--project='], { apiKey: FAKE_KEY }),
+    ).rejects.toThrow(/--project requires a value/);
+    await expect(
+      issuesCommand(['--project', '--limit', '25'], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/--project requires a value/);
   });
 

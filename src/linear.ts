@@ -2,10 +2,90 @@ import { mapLinearError, networkError, AxiError } from './errors.js';
 
 export const LINEAR_API_URL = 'https://api.linear.app/graphql';
 
+// ---------------------------------------------------------------------------
+// Rate-limit retry (#30)
+// ---------------------------------------------------------------------------
+
+/**
+ * On a Linear rate-limit response, linearRequest re-sends the request up to
+ * this many times (3 attempts total) before surfacing mapLinearError's
+ * structured RATE_LIMITED error — the retry is transport-level and bounded,
+ * so no caller or flag knows it exists.
+ */
+const RATE_LIMIT_MAX_RETRIES = 2;
+
+/** A retry delay is clamped into [1s, 60s] so a hostile/garbage header cannot
+ * stall the CLI. */
+const RETRY_DELAY_MIN_MS = 1_000;
+const RETRY_DELAY_MAX_MS = 60_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * How long to wait before retry attempt `retry` (0-based) after a rate limit.
+ * Linear documents its `X-RateLimit-*-Reset` headers as UTC epoch milliseconds,
+ * so use the most specific available reset time first. `Retry-After` remains a
+ * defensive fallback for intermediaries that return HTTP 429. All values are
+ * clamped to [1s, 60s], otherwise a bounded exponential fallback is used.
+ *
+ */
+function rateLimitRetryDelayMs(response: Response, retry: number): number {
+  const resets = [
+    'x-ratelimit-endpoint-requests-reset',
+    'x-ratelimit-requests-reset',
+    'x-ratelimit-complexity-reset',
+  ];
+  for (const name of resets) {
+    const resetAt = Number(response.headers?.get?.(name));
+    if (Number.isFinite(resetAt) && resetAt > Date.now()) {
+      return Math.min(
+        Math.max(resetAt - Date.now(), RETRY_DELAY_MIN_MS),
+        RETRY_DELAY_MAX_MS,
+      );
+    }
+  }
+
+  const raw = response.headers?.get?.('retry-after');
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(
+      Math.max(seconds * 1_000, RETRY_DELAY_MIN_MS),
+      RETRY_DELAY_MAX_MS,
+    );
+  }
+  // Missing/invalid reset and Retry-After values (null, "", "0", HTTP-date
+  // form, garbage).
+  return Math.min(RETRY_DELAY_MIN_MS * 2 ** retry, RETRY_DELAY_MAX_MS);
+}
+
+function isRateLimitedResponse(status: number, body: unknown): boolean {
+  if (status === 429) return true;
+  if (!body || typeof body !== 'object') return false;
+  const errors = (body as { errors?: unknown }).errors;
+  return (
+    Array.isArray(errors) &&
+    errors.some(
+      (error) =>
+        typeof error === 'object' &&
+        error !== null &&
+        (error as { extensions?: { code?: unknown } }).extensions?.code ===
+          'RATELIMITED',
+    )
+  );
+}
+
 /**
  * Raw transport: POST a GraphQL document to Linear with the API key as the
  * Authorization header. Returns the parsed `data` on success; throws an AxiError
  * (translated from HTTP/GraphQL status) otherwise.
+ *
+ * Linear documents rate-limit errors as HTTP 400 plus a GraphQL
+ * `extensions.code` of `RATELIMITED`; HTTP 429 is also handled defensively.
+ * Those responses are retried with bounded backoff (see
+ * rateLimitRetryDelayMs). Once retries are exhausted — or another response
+ * arrives — the error path below surfaces mapLinearError's structured error.
  *
  * Set LINEAR_AXI_DEBUG=1 to dump the raw response body to stderr on error,
  * which makes query-shape mistakes debuggable in one round trip.
@@ -16,24 +96,33 @@ export async function linearRequest<T = unknown>(
   variables: Record<string, unknown> = {},
 ): Promise<T> {
   let response: Response;
-  try {
-    response = await fetch(LINEAR_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: apiKey,
-      },
-      body: JSON.stringify({ query, variables }),
-    });
-  } catch (cause) {
-    throw networkError(cause);
-  }
-
   let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
+  for (let retry = 0; ; retry++) {
+    try {
+      response = await fetch(LINEAR_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: apiKey,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+    } catch (cause) {
+      throw networkError(cause);
+    }
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    if (
+      !isRateLimitedResponse(response.status, body) ||
+      retry >= RATE_LIMIT_MAX_RETRIES
+    ) {
+      break;
+    }
+    await sleep(rateLimitRetryDelayMs(response, retry));
   }
 
   const withErrors = body as { errors?: unknown } | null;
@@ -46,6 +135,16 @@ export async function linearRequest<T = unknown>(
       console.error('[linear-axi] raw body:', JSON.stringify(body));
     }
     throw mapLinearError({ status: response.status, body });
+  }
+
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    !Object.prototype.hasOwnProperty.call(body, 'data')
+  ) {
+    throw new AxiError('Linear returned an invalid response', 'UNKNOWN', [
+      'Retry in a few seconds',
+    ]);
   }
 
   return (body as { data: T }).data;
@@ -66,6 +165,18 @@ export const ISSUE_LIST_FIELDS = `
   updatedAt
 `;
 
+/**
+ * Detail selection for a single issue. Label nodes include `id` because
+ * `issue update --label/--remove-label` (#24) needs the issue's CURRENT label
+ * ids to compute the union/difference replacement set — names alone cannot be
+ * sent back to IssueUpdateInput.labelIds. `project { id name }` and
+ * `cycle { id number }` serve the same purpose for #25: update-side no-op
+ * detection compares the issue's CURRENT project/cycle ids against the
+ * resolved --project/--cycle ids before sending IssueUpdateInput.projectId/
+ * cycleId. Renderers read none of the extra keys, so they stay invisible.
+ * The sub-issue children connection is NOT part of this base selection — it
+ * rides along via ISSUE_CHILDREN_FIELDS only for `issue view --full` (#26).
+ */
 export const ISSUE_DETAIL_FIELDS = `
   id
   identifier
@@ -75,7 +186,9 @@ export const ISSUE_DETAIL_FIELDS = `
   priority
   assignee { name }
   team { key name id }
-  labels { nodes { name } }
+  labels { nodes { id name } }
+  project { id name }
+  cycle { id number }
   url
   createdAt
   updatedAt
@@ -90,6 +203,20 @@ export function withExtraFields(base: string, extraKeys: string[]): string {
   if (extraKeys.length === 0) return base;
   return `${base}${extraKeys.map((k) => `\n  ${k}`).join('')}`;
 }
+
+/**
+ * Sub-issue (children) selection for `issue view --full` (#26). Linear's
+ * Issue type exposes its sub-issues as `children: IssueConnection`
+ * ("Children of the issue", @linear/sdk v90 — the field is named `children`,
+ * not `subIssues`); IssueConnection carries `nodes: Array<Issue>`. One detail
+ * row per child needs identifier, title, and the workflow state's display
+ * name. Appended to ISSUE_DETAIL_FIELDS only when --full requests it, so the
+ * default detail document stays byte-identical (same opt-in principle as
+ * withExtraFields).
+ */
+export const ISSUE_CHILDREN_FIELDS = `
+  children { nodes { identifier title state { name } } }
+`;
 
 /**
  * Selection for the `projects` connection. We select `status { type }` rather
@@ -120,6 +247,18 @@ export const CYCLE_LIST_FIELDS = `
   progress
 `;
 
+/**
+ * A sub-issue child row as returned by ISSUE_CHILDREN_FIELDS (#26): the
+ * subset of Issue fields one `issue view --full` child line renders. Shapes
+ * match the generated Issue type in @linear/sdk v90 (identifier/title are
+ * non-nullable Strings; state is the issue's WorkflowState).
+ */
+export interface LinearIssueChild {
+  identifier: string;
+  title: string;
+  state?: { name: string } | null;
+}
+
 export interface LinearIssue {
   id: string;
   identifier: string;
@@ -129,7 +268,19 @@ export interface LinearIssue {
   priority?: number;
   assignee?: { name: string } | null;
   team?: { id?: string; key: string; name?: string } | null;
-  labels?: { nodes: Array<{ name: string }> } | null;
+  // `id` is present when the selection includes it (ISSUE_DETAIL_FIELDS does;
+  // ISSUE_LIST_FIELDS selects no labels at all), so it is optional here.
+  labels?: { nodes: Array<{ id?: string; name: string }> } | null;
+  // Present when selected (ISSUE_DETAIL_FIELDS does, list selections do not):
+  // the issue's current project/cycle for #25 update no-op detection. Issue
+  // .project and .cycle are nullable object types per @linear/sdk (an issue
+  // can be in neither); `cycle.number` mirrors Cycle.number (Float, unique
+  // within its team).
+  project?: { id: string; name: string } | null;
+  cycle?: { id: string; number: number } | null;
+  // Present when selected via ISSUE_CHILDREN_FIELDS (issue view --full only,
+  // #26): the issue's sub-issues ("children" connection, server order).
+  children?: { nodes: LinearIssueChild[] } | null;
   url?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -534,15 +685,25 @@ export async function fetchIssues(
  *
  * `extraFields` is a list of opt-in extra scalar Issue keys (from `--fields`)
  * appended to the selection; the default document is used when empty.
+ *
+ * `includeChildren` (#26) additionally appends ISSUE_CHILDREN_FIELDS so
+ * `issue view --full` can list the issue's sub-issues. Opt-in for the same
+ * reason as the scalar extras: every update/delete/state-resolution caller
+ * shares this query and would otherwise carry (and pay for) a children page
+ * it never reads.
  */
 export async function fetchIssue(
   apiKey: string,
   ref: string,
   extraFields: string[] = [],
+  includeChildren = false,
 ): Promise<LinearIssue | undefined> {
+  const selection = includeChildren
+    ? `${withExtraFields(ISSUE_DETAIL_FIELDS, extraFields)}${ISSUE_CHILDREN_FIELDS}`
+    : withExtraFields(ISSUE_DETAIL_FIELDS, extraFields);
   const data = await linearRequest<{ issue: LinearIssue | null }>(
     apiKey,
-    `query Issue($id: String!) { issue(id: $id) { ${withExtraFields(ISSUE_DETAIL_FIELDS, extraFields)} } }`,
+    `query Issue($id: String!) { issue(id: $id) { ${selection} } }`,
     { id: ref },
   );
   return data.issue ?? undefined;
@@ -650,6 +811,36 @@ export async function fetchComments(
   return { comments: comments.slice(0, limit), hasMore };
 }
 
+/**
+ * A single comment fetched by id via fetchComment: the id plus just enough
+ * context for the write paths' confirmations — the parent issue's identifier
+ * (Comment.issue is nullable per @linear/sdk: "Null if the comment belongs to
+ * a different parent entity type", e.g. project comments).
+ */
+export interface LinearCommentRef {
+  id: string;
+  issue?: { identifier: string } | null;
+}
+
+/**
+ * Fetch one comment by id (#27). The root `comment(id:)` query exists in
+ * @linear/sdk v90 (QueryCommentArgs: { hash?: String, id?: String }, returns
+ * Maybe<Comment>) — like `issue(id:)`, a missing id resolves to null rather
+ * than an error, which is exactly what the delete path's idempotent no-op and
+ * the update path's loud NOT_FOUND branch on.
+ */
+export async function fetchComment(
+  apiKey: string,
+  id: string,
+): Promise<LinearCommentRef | undefined> {
+  const data = await linearRequest<{ comment: LinearCommentRef | null }>(
+    apiKey,
+    `query Comment($id: String!) { comment(id: $id) { id issue { identifier } } }`,
+    { id },
+  );
+  return data.comment ?? undefined;
+}
+
 /** Selection for label nodes. `color` is a raw HEX string (see LinearLabel). */
 export const LABEL_LIST_FIELDS = `
   id
@@ -747,6 +938,27 @@ export interface IssueCreateInput {
   description?: string;
   teamKey: string;
   labelNames?: string[];
+  /**
+   * Put the issue in this project (resolved by the caller from --project via
+   * requireProjectId). IssueCreateInput.projectId is a nullable String
+   * ("The project associated with the issue", @linear/sdk v90).
+   */
+  projectId?: string;
+  /**
+   * Put the issue in this cycle (resolved by the caller from --cycle).
+   * IssueCreateInput.cycleId is a nullable String ("The cycle associated with
+   * the issue", @linear/sdk v90).
+   */
+  cycleId?: string;
+  /**
+   * Create the issue as a sub-issue of this parent (resolved by the caller
+   * from --parent via fetchIssue). IssueCreateInput.parentId is a nullable
+   * String ("The identifier of the parent issue. Can be a UUID or issue
+   * identifier (e.g., 'LIN-123')", @linear/sdk v90) — verified as the
+   * mechanism for #26: the generated SDK types expose NO subIssueCreate
+   * mutation, sub-issues are created through issueCreate + parentId.
+   */
+  parentId?: string;
 }
 
 export async function createIssue(
@@ -783,6 +995,24 @@ export async function createIssue(
     varDecls.push('$labelIds: [String!]');
     variables['labelIds'] = labelIds;
   }
+  // projectId/cycleId (#25) follow the same omit-null convention: declared
+  // and sent only when the caller resolved an id.
+  if (input.projectId !== undefined) {
+    inputFields.push('projectId: $projectId');
+    varDecls.push('$projectId: String');
+    variables['projectId'] = input.projectId;
+  }
+  if (input.cycleId !== undefined) {
+    inputFields.push('cycleId: $cycleId');
+    varDecls.push('$cycleId: String');
+    variables['cycleId'] = input.cycleId;
+  }
+  // parentId (#26) follows the same omit-null convention as above.
+  if (input.parentId !== undefined) {
+    inputFields.push('parentId: $parentId');
+    varDecls.push('$parentId: String');
+    variables['parentId'] = input.parentId;
+  }
 
   const data = await linearRequest<{
     issueCreate: { issue: LinearIssue; success: boolean };
@@ -808,6 +1038,34 @@ export interface IssueUpdate {
   description?: string;
   stateName?: string;
   priority?: number;
+  /**
+   * Assign the issue to this user id. Undefined leaves the assignee
+   * untouched; Linear's IssueUpdateInput.assigneeId is a nullable String
+   * ("The identifier of the user to assign the issue to", @linear/sdk v90).
+   */
+  assigneeId?: string;
+  /**
+   * FULL REPLACEMENT label-id set — Linear's IssueUpdateInput.labelIds
+   * replaces the issue's labels wholesale ("The identifiers of the issue
+   * labels associated with this ticket", @linear/sdk v90). Callers compute
+   * union/difference against the issue's current ids. An EMPTY ARRAY IS
+   * SENT EXPLICITLY (removing the last label must work); only undefined
+   * means "leave labels alone".
+   */
+  labelIds?: string[];
+  /**
+   * Move the issue into this project (resolved by the caller from --project
+   * via requireProjectId). IssueUpdateInput.projectId is a nullable String
+   * ("The project associated with the issue", @linear/sdk v90); undefined
+   * leaves the project untouched.
+   */
+  projectId?: string;
+  /**
+   * Move the issue into this cycle (resolved by the caller from --cycle).
+   * IssueUpdateInput.cycleId is a nullable String ("The cycle associated
+   * with the issue", @linear/sdk v90); undefined leaves the cycle untouched.
+   */
+  cycleId?: string;
 }
 
 /**
@@ -851,6 +1109,31 @@ export async function updateIssue(
     inputFields.push('stateId: $stateId');
     varDecls.push('$stateId: String');
     variables['stateId'] = stateId;
+  }
+  // assigneeId/labelIds follow the same omit-null convention as above, with
+  // one deliberate exception: labelIds === [] IS included — an explicit
+  // removal of the last label must reach Linear as an empty replacement set,
+  // not be skipped like a null optional.
+  if (update.assigneeId !== undefined) {
+    inputFields.push('assigneeId: $assigneeId');
+    varDecls.push('$assigneeId: String');
+    variables['assigneeId'] = update.assigneeId;
+  }
+  if (update.labelIds !== undefined) {
+    inputFields.push('labelIds: $labelIds');
+    varDecls.push('$labelIds: [String!]');
+    variables['labelIds'] = update.labelIds;
+  }
+  // projectId/cycleId (#25) follow the same omit-null convention as above.
+  if (update.projectId !== undefined) {
+    inputFields.push('projectId: $projectId');
+    varDecls.push('$projectId: String');
+    variables['projectId'] = update.projectId;
+  }
+  if (update.cycleId !== undefined) {
+    inputFields.push('cycleId: $cycleId');
+    varDecls.push('$cycleId: String');
+    variables['cycleId'] = update.cycleId;
   }
 
   const data = await linearRequest<{
@@ -908,6 +1191,61 @@ export async function createComment(
   }
 }
 
+/**
+ * Update a comment's body (#27). Mutation shape verified against the generated
+ * documents in @linear/sdk v90 (UpdateCommentMutationVariables): the root
+ * mutation is `commentUpdate(id: String!, input: CommentUpdateInput, ...)`
+ * returning CommentPayload { comment, lastSyncId, success }. CommentUpdateInput
+ * exposes exactly one non-internal field — `body: String` ("The comment
+ * content") — so no omit-null input builder is needed: body is the single
+ * required value and is always sent.
+ */
+export async function updateComment(
+  apiKey: string,
+  id: string,
+  body: string,
+): Promise<void> {
+  const data = await linearRequest<{
+    commentUpdate: { success: boolean };
+  }>(
+    apiKey,
+    `mutation UpdateComment($id: String!, $body: String!) {
+      commentUpdate(id: $id, input: { body: $body }) {
+        success
+      }
+    }`,
+    { id, body },
+  );
+  if (!data.commentUpdate.success) {
+    throw new AxiError('Linear rejected the comment update', 'UNKNOWN');
+  }
+}
+
+/**
+ * Delete a comment (#27). Mutation shape verified against the generated
+ * documents in @linear/sdk v90 (DeleteCommentMutationVariables): the root
+ * mutation is `commentDelete(id: String!)` returning DeletePayload
+ * { entityId, lastSyncId, success } — success is the only field the CLI
+ * needs, mirroring deleteIssue.
+ */
+export async function deleteComment(
+  apiKey: string,
+  id: string,
+): Promise<void> {
+  const data = await linearRequest<{
+    commentDelete: { success: boolean };
+  }>(
+    apiKey,
+    `mutation DeleteComment($id: String!) {
+      commentDelete(id: $id) { success }
+    }`,
+    { id },
+  );
+  if (!data.commentDelete.success) {
+    throw new AxiError('Linear rejected the comment delete', 'UNKNOWN');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Resolution helpers
 // ---------------------------------------------------------------------------
@@ -951,12 +1289,112 @@ export async function resolveProjectId(
 }
 
 /**
+ * Write-path project resolution (#25): resolveProjectId, but LOUD on no match.
+ * Silently creating/updating an issue without its requested project would
+ * surprise far more than a failed command (AXI principle 6), so mutations
+ * follow resolveStateIdByName/resolveUserId's loud convention while the read
+ * path keeps resolveProjectId's silent-undefined semantics.
+ */
+export async function requireProjectId(
+  apiKey: string,
+  name: string,
+): Promise<string> {
+  const id = await resolveProjectId(apiKey, name);
+  if (!id) {
+    throw new AxiError(
+      `Project "${name}" not found in your workspace`,
+      'VALIDATION_ERROR',
+      ['Run `linear-axi projects` to see project names (exact match required)'],
+    );
+  }
+  return id;
+}
+
+/** An active cycle as returned by fetchActiveCycles. */
+export interface ActiveCycle {
+  id: string;
+  number: number;
+  /**
+   * Key of the team the cycle belongs to — Cycle.team is non-nullable
+   * ("The team that the cycle belongs to. Each cycle is scoped to exactly one
+   * team", @linear/sdk), so the workspace-wide query can attribute every
+   * active cycle to its team.
+   */
+  teamKey: string;
+}
+
+/**
+ * The active cycles of the workspace (or of one team) for write-side
+ * `--cycle current` resolution (#25). Uses the root `cycles` connection with
+ * `filter: CycleFilter` (QueryCyclesArgs in @linear/sdk v90): isActive is a
+ * BooleanComparator with eq (the same comparator the #21 read path puts in
+ * IssueFilter.cycle), and team is a TeamFilter, so `team: { key: { eq } }`
+ * scopes to one team — the same key comparator resolveTeamId relies on. One
+ * round trip either way; a team has at most one active cycle in practice, but
+ * callers decide what multiple matches mean (the workspace-wide form returns
+ * one per team with cycling enabled).
+ */
+export async function fetchActiveCycles(
+  apiKey: string,
+  teamKey?: string,
+): Promise<ActiveCycle[]> {
+  const perTeam = teamKey !== undefined;
+  const query = perTeam
+    ? `query TeamActiveCycles($teamKey: String!) {
+        cycles(filter: { isActive: { eq: true }, team: { key: { eq: $teamKey } } }) {
+          nodes { id number team { key } }
+        }
+      }`
+    : `query ActiveCycles {
+        cycles(filter: { isActive: { eq: true } }) { nodes { id number team { key } } }
+      }`;
+  const data = await linearRequest<{
+    cycles: {
+      nodes: Array<{ id: string; number: number; team: { key: string } }>;
+    };
+  }>(apiKey, query, perTeam ? { teamKey: teamKey.toUpperCase() } : {});
+  return data.cycles.nodes.map((n) => ({
+    id: n.id,
+    number: n.number,
+    teamKey: n.team.key,
+  }));
+}
+
+/**
+ * Resolve a team's cycle NUMBER to its id (#25 write path). Cycle numbers are
+ * "unique within its team" and restart per team (Cycle.number,
+ * @linear/sdk v90), so the team key is mandatory — the same disambiguation
+ * the #21 read path enforces. CycleFilter.number is a NumberComparator whose
+ * eq takes a Float. Returns undefined when the team has no cycle with that
+ * number (callers fail loud — a mutation must not silently skip the cycle).
+ */
+export async function resolveCycleIdByNumber(
+  apiKey: string,
+  teamKey: string,
+  number: number,
+): Promise<string | undefined> {
+  const data = await linearRequest<{
+    cycles: { nodes: Array<{ id: string }> };
+  }>(
+    apiKey,
+    `query CycleByNumber($number: Float!, $teamKey: String!) {
+      cycles(filter: { number: { eq: $number }, team: { key: { eq: $teamKey } } }) {
+        nodes { id }
+      }
+    }`,
+    { number, teamKey: teamKey.toUpperCase() },
+  );
+  return data.cycles.nodes[0]?.id;
+}
+
+/**
  * Resolve label names to their ids, case-insensitively, in server order.
  * Reuses fetchLabels (auto-paginated) so label resolution keeps working in
  * workspaces with more than one page (50) of labels — the old inline query
  * here fetched a single unpaginated page and silently missed the rest.
+ * Unknown names are silently skipped (same semantics as issue create).
  */
-async function resolveLabelIds(
+export async function resolveLabelIds(
   apiKey: string,
   names: string[],
 ): Promise<string[]> {
@@ -965,6 +1403,52 @@ async function resolveLabelIds(
   return labels
     .filter((l) => wanted.includes(l.name.toLowerCase()))
     .map((l) => l.id);
+}
+
+/**
+ * Resolve a user's display name (exact match) to their id for
+ * `issue update --assignee <name>` (#24). Query shape verified against the
+ * generated documents in @linear/sdk v90: Query.users takes
+ * `filter: UserFilter` where UserFilter.name is a StringComparator with `eq`,
+ * and the User type exposes id (ID), name, email — all selected here.
+ *
+ * Fails loud on both no-match and multi-match (display names are not unique
+ * in Linear), listing the matched candidates like resolveStateIdByName lists
+ * available states.
+ */
+export async function resolveUserId(
+  apiKey: string,
+  name: string,
+): Promise<string> {
+  const data = await linearRequest<{
+    users: { nodes: Array<{ id: string; name: string; email: string }> };
+  }>(
+    apiKey,
+    `query UserByName($name: String!) {
+      users(filter: { name: { eq: $name } }) { nodes { id name email } }
+    }`,
+    { name },
+  );
+
+  const nodes = data.users.nodes;
+  if (nodes.length === 0) {
+    throw new AxiError(
+      `User "${name}" not found in your workspace`,
+      'VALIDATION_ERROR',
+      ['Use the exact display name, or "me" for yourself'],
+    );
+  }
+  if (nodes.length > 1) {
+    const candidates = nodes
+      .map((u) => `${u.name} <${u.email}>`)
+      .join(', ');
+    throw new AxiError(
+      `User "${name}" matches ${nodes.length} users`,
+      'VALIDATION_ERROR',
+      [`Candidates: ${candidates}`],
+    );
+  }
+  return nodes[0]!.id;
 }
 
 async function resolveStateIdByName(

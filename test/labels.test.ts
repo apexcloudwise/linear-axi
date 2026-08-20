@@ -220,6 +220,12 @@ describe('labels failures', () => {
       labelsCommand(['--bogus'], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/unknown flag --bogus/);
   });
+
+  it('rejects positional arguments loudly', async () => {
+    await expect(labelsCommand(['extra'], { apiKey: FAKE_KEY })).rejects.toThrow(
+      /Unexpected argument: extra/,
+    );
+  });
 });
 
 describe('label resolution reuse', () => {

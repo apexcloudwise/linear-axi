@@ -1,6 +1,7 @@
 import type { LinearContext } from '../context.js';
 import { requireKey } from '../config.js';
 import { assertKnownFlags } from '../args.js';
+import { AxiError } from '../errors.js';
 import { fetchProjects } from '../linear.js';
 import {
   field,
@@ -43,6 +44,10 @@ export async function projectsCommand(
 ): Promise<string> {
   // `projects` takes no flags — reject any rather than silently dropping it.
   assertKnownFlags(args, []);
+  const positional = args.find((arg) => !arg.startsWith('--'));
+  if (positional !== undefined) {
+    throw new AxiError(`Unexpected argument: ${positional}`, 'VALIDATION_ERROR');
+  }
   const apiKey = requireKey(ctx.apiKey);
   const { projects, hasMore } = await fetchProjects(apiKey);
 
