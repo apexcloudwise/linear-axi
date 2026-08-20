@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/apexcloudwise/linear-axi/compare/linear-axi-v0.1.3...linear-axi-v0.1.4) (2026-08-20)
+
+
+### Features
+
+* add write operations and transport hardening ([ad6b141](https://github.com/apexcloudwise/linear-axi/commit/ad6b141095576cd6f62f956add1ed6e4183930ba))
+
 ## [0.1.3](https://github.com/apexcloudwise/linear-axi/compare/linear-axi-v0.1.2...linear-axi-v0.1.3) (2026-08-20)
 
 
