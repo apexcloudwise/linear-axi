@@ -506,15 +506,14 @@ async function updateIssueCmd(
     throw new AxiError(`Issue "${refRaw}" not found`, 'NOT_FOUND');
   }
 
-  // Idempotency: if a requested state already matches, treat as no-op.
-  if (
+  // Idempotency: if a requested state already matches, treat only that field
+  // as a no-op. Other requested fields in the same update must still be
+  // applied.
+  const stateUpdate =
     stateName &&
     existing.state?.name?.toLowerCase() === stateName.toLowerCase()
-  ) {
-    return renderOutput([
-      `issue: ${existing.identifier} already "${stateName}" (no-op)`,
-    ]);
-  }
+      ? undefined
+      : stateName;
 
   // Assignee (#24): "me" resolves to the viewer — fetchViewer already
   // returns the id the mutation needs, so no users() round trip. Any other
@@ -623,7 +622,7 @@ async function updateIssueCmd(
   const hasPatch =
     title !== undefined ||
     descriptionInput !== undefined ||
-    stateName !== undefined ||
+    stateUpdate !== undefined ||
     priority !== undefined ||
     assigneeId !== undefined ||
     labelIds !== undefined ||
@@ -638,7 +637,7 @@ async function updateIssueCmd(
   const updated = await updateIssue(apiKey, existing.id, {
     title,
     description: descriptionInput,
-    stateName,
+    stateName: stateUpdate,
     priority,
     assigneeId,
     labelIds,
@@ -665,6 +664,7 @@ async function deleteIssueCmd(
   args: string[],
   ctx: LinearContext,
 ): Promise<string> {
+  assertKnownFlags(args, []);
   const apiKey = requireKey(ctx.apiKey);
   const refRaw = getPositional(args);
   if (!refRaw) {
@@ -753,14 +753,13 @@ export function readDescriptionFile(
 }
 
 function parsePriority(raw: string): number {
-  const n = parseInt(raw, 10);
-  if (isNaN(n) || n < 0 || n > 4) {
+  if (!/^[0-4]$/.test(raw)) {
     throw new AxiError(
       `Invalid --priority: ${raw} (use 0-4)`,
       'VALIDATION_ERROR',
     );
   }
-  return n;
+  return Number(raw);
 }
 
 /**

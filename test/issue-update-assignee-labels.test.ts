@@ -340,6 +340,44 @@ describe('issue update --label / --remove-label', () => {
 });
 
 describe('issue update acceptance and guards', () => {
+  it('applies other changes when the requested state is already current', async () => {
+    const { requests } = stubUpdateFetch({
+      issue: issueNode({ state: { name: 'Todo', type: 'unstarted' } }),
+    });
+
+    const out = await issueCommand(
+      ['update', 'LIN-1', '--state', 'Todo', '--title', 'Renamed'],
+      { apiKey: FAKE_KEY },
+    );
+
+    expect(mutationRequests(requests)).toHaveLength(1);
+    expect(mutationRequests(requests)[0]?.body.variables).toEqual({
+      id: 'ir-1',
+      title: 'Renamed',
+    });
+    expect(out).toContain('updated: LIN-1');
+  });
+
+  it('rejects a priority with a non-numeric suffix', async () => {
+    const { requests } = stubUpdateFetch();
+
+    await expect(
+      issueCommand(['update', 'LIN-1', '--priority', '2junk'], {
+        apiKey: FAKE_KEY,
+      }),
+    ).rejects.toThrow(/Invalid --priority/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('rejects unknown flags on issue delete', async () => {
+    const { requests } = stubUpdateFetch();
+
+    await expect(
+      issueCommand(['delete', 'LIN-1', '--bogus'], { apiKey: FAKE_KEY }),
+    ).rejects.toThrow(/unknown flag --bogus/);
+    expect(requests).toHaveLength(0);
+  });
+
   it('applies --assignee me --label bug together (acceptance case)', async () => {
     const { requests } = stubUpdateFetch();
 
