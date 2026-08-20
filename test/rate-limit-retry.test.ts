@@ -44,6 +44,22 @@ function rateLimitedResponse(retryAfterSeconds?: number): Response {
   } as Response;
 }
 
+/** Linear documents rate limits as HTTP 400 plus this GraphQL error code. */
+function linearRateLimitedResponse(resetAt?: number): Response {
+  const headers = new Headers();
+  if (resetAt !== undefined) {
+    headers.set('x-ratelimit-requests-reset', String(resetAt));
+  }
+  return {
+    ok: false,
+    status: 400,
+    headers,
+    json: async () => ({
+      errors: [{ message: 'Rate limit exceeded', extensions: { code: 'RATELIMITED' } }],
+    }),
+  } as Response;
+}
+
 /** A non-429 HTTP failure (401/500/...) with a Headers-like headers object. */
 function httpErrorResponse(status: number): Response {
   return {
@@ -134,6 +150,52 @@ describe('429 then success (Retry-After honored)', () => {
     await vi.advanceTimersByTimeAsync(1);
     await pending;
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('documented Linear GraphQL rate limits', () => {
+  it('retries HTTP 400 with the RATELIMITED GraphQL code', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    const fetchMock = stubSequencedFetch(
+      linearRateLimitedResponse(),
+      okResponse(VIEWER),
+    );
+
+    const pending = linearRequest(FAKE_KEY, QUERY);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toEqual(VIEWER);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('honors Linear’s documented request-reset header', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    const fetchMock = stubSequencedFetch(
+      linearRateLimitedResponse(Date.now() + 2_000),
+      okResponse(VIEWER),
+    );
+
+    const pending = linearRequest(FAKE_KEY, QUERY);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual(VIEWER);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps exhausted documented rate limits to RATE_LIMITED', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    const fetchMock = stubSequencedFetch(
+      linearRateLimitedResponse(),
+      linearRateLimitedResponse(),
+      linearRateLimitedResponse(),
+    );
+
+    const pending = linearRequest(FAKE_KEY, QUERY).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(3_000);
+    const err = (await pending) as AxiError;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(err.code).toBe('RATE_LIMITED');
   });
 });
 

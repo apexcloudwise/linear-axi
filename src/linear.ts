@@ -7,15 +7,15 @@ export const LINEAR_API_URL = 'https://api.linear.app/graphql';
 // ---------------------------------------------------------------------------
 
 /**
- * On HTTP 429, linearRequest re-sends the request up to this many times (3
- * attempts total) before surfacing mapLinearError's structured RATE_LIMITED
- * error — the retry is transport-level and bounded, so no caller or flag
- * knows it exists.
+ * On a Linear rate-limit response, linearRequest re-sends the request up to
+ * this many times (3 attempts total) before surfacing mapLinearError's
+ * structured RATE_LIMITED error — the retry is transport-level and bounded,
+ * so no caller or flag knows it exists.
  */
 const RATE_LIMIT_MAX_RETRIES = 2;
 
-/** An honored Retry-After is clamped into [1s, 60s] so a hostile/garbage
- * header cannot stall the CLI. */
+/** A retry delay is clamped into [1s, 60s] so a hostile/garbage header cannot
+ * stall the CLI. */
 const RETRY_DELAY_MIN_MS = 1_000;
 const RETRY_DELAY_MAX_MS = 60_000;
 
@@ -24,15 +24,32 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * How long to wait before retry attempt `retry` (0-based) after a 429: the
- * response's `Retry-After` header when it parses as positive delay-seconds
- * (clamped to [1s, 60s]), else a bounded exponential fallback (1s, 2s, ...).
+ * How long to wait before retry attempt `retry` (0-based) after a rate limit.
+ * Linear documents its `X-RateLimit-*-Reset` headers as UTC epoch milliseconds,
+ * so use the most specific available reset time first. `Retry-After` remains a
+ * defensive fallback for intermediaries that return HTTP 429. All values are
+ * clamped to [1s, 60s], otherwise a bounded exponential fallback is used.
  *
  * mapLinearError derives RATE_LIMITED from the HTTP status alone, so HTTP 429
  * is the only retry signal here — a GraphQL-level error (HTTP 200 + `errors`)
  * is never rate-limit-typed by mapLinearError and is never retried.
  */
 function rateLimitRetryDelayMs(response: Response, retry: number): number {
+  const resets = [
+    'x-ratelimit-endpoint-requests-reset',
+    'x-ratelimit-requests-reset',
+    'x-ratelimit-complexity-reset',
+  ];
+  for (const name of resets) {
+    const resetAt = Number(response.headers?.get?.(name));
+    if (Number.isFinite(resetAt) && resetAt > Date.now()) {
+      return Math.min(
+        Math.max(resetAt - Date.now(), RETRY_DELAY_MIN_MS),
+        RETRY_DELAY_MAX_MS,
+      );
+    }
+  }
+
   const raw = response.headers?.get?.('retry-after');
   const seconds = Number(raw);
   if (Number.isFinite(seconds) && seconds > 0) {
@@ -41,8 +58,25 @@ function rateLimitRetryDelayMs(response: Response, retry: number): number {
       RETRY_DELAY_MAX_MS,
     );
   }
-  // Missing/invalid Retry-After (null, "", "0", HTTP-date form, garbage).
+  // Missing/invalid reset and Retry-After values (null, "", "0", HTTP-date
+  // form, garbage).
   return Math.min(RETRY_DELAY_MIN_MS * 2 ** retry, RETRY_DELAY_MAX_MS);
+}
+
+function isRateLimitedResponse(status: number, body: unknown): boolean {
+  if (status === 429) return true;
+  if (!body || typeof body !== 'object') return false;
+  const errors = (body as { errors?: unknown }).errors;
+  return (
+    Array.isArray(errors) &&
+    errors.some(
+      (error) =>
+        typeof error === 'object' &&
+        error !== null &&
+        (error as { extensions?: { code?: unknown } }).extensions?.code ===
+          'RATELIMITED',
+    )
+  );
 }
 
 /**
@@ -50,10 +84,11 @@ function rateLimitRetryDelayMs(response: Response, retry: number): number {
  * Authorization header. Returns the parsed `data` on success; throws an AxiError
  * (translated from HTTP/GraphQL status) otherwise.
  *
- * HTTP 429 responses are retried with bounded backoff honoring Retry-After
- * (see rateLimitRetryDelayMs); once retries are exhausted — or a non-429
- * response arrives, including a non-429 after a 429 — the error path below
- * surfaces mapLinearError's structured error unchanged.
+ * Linear documents rate-limit errors as HTTP 400 plus a GraphQL
+ * `extensions.code` of `RATELIMITED`; HTTP 429 is also handled defensively.
+ * Those responses are retried with bounded backoff (see
+ * rateLimitRetryDelayMs). Once retries are exhausted — or another response
+ * arrives — the error path below surfaces mapLinearError's structured error.
  *
  * Set LINEAR_AXI_DEBUG=1 to dump the raw response body to stderr on error,
  * which makes query-shape mistakes debuggable in one round trip.
@@ -64,6 +99,7 @@ export async function linearRequest<T = unknown>(
   variables: Record<string, unknown> = {},
 ): Promise<T> {
   let response: Response;
+  let body: unknown;
   for (let retry = 0; ; retry++) {
     try {
       response = await fetch(LINEAR_API_URL, {
@@ -77,15 +113,19 @@ export async function linearRequest<T = unknown>(
     } catch (cause) {
       throw networkError(cause);
     }
-    if (response.status !== 429 || retry >= RATE_LIMIT_MAX_RETRIES) break;
-    await sleep(rateLimitRetryDelayMs(response, retry));
-  }
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
 
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
+    if (
+      !isRateLimitedResponse(response.status, body) ||
+      retry >= RATE_LIMIT_MAX_RETRIES
+    ) {
+      break;
+    }
+    await sleep(rateLimitRetryDelayMs(response, retry));
   }
 
   const withErrors = body as { errors?: unknown } | null;
