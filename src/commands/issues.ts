@@ -17,7 +17,7 @@ import {
 import { formatCountLine } from '../format.js';
 
 export const ISSUES_HELP = `usage: linear-axi issues [--team <KEY>] [--state <type>] [--assignee <name|me>] [--label <name>] [--project <name>] [--cycle <current|number>] [--search <text>] [--fields <a,b,c>] [--limit <n>]
-	List Linear issues, most recently updated first (relevance-ranked when --search is given).
+List Linear issues, most recently updated first (full-text search when --search is given).
 
 flags:
   --team <KEY>       filter by team key (e.g. LIN)
@@ -26,7 +26,7 @@ flags:
   --label <name>     filter by label name; repeat to match ANY of the given labels (issues carrying at least one)
   --project <name>   filter by project name (exact match; run \`linear-axi projects\` for names)
   --cycle <current|number> filter by cycle: "current" matches issues in any team's active cycle (with --team, just that team's); a cycle number requires --team because numbers restart per team (run \`linear-axi cycles\` for numbers)
-  --search <text>    full-text search (same ranking as Linear's app search); composable with the filters above
+  --search <text>    full-text search; composable with the filters above
   --fields <a,b,c>   opt-in extra columns (comma-separated): url, estimate, dueDate, createdAt; default columns are untouched without this flag
   --limit <n>        max issues to return (default 25, max 500; fetched in pages of 50)
 

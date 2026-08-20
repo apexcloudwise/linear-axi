@@ -378,7 +378,7 @@ export interface IssueListFilter {
   labels?: string[]; // label names — matches issues carrying ANY of them
   project?: string; // project name — exact match
   cycle?: 'current' | number; // 'current' = any team's active cycle; a number is per-team (compose with team)
-  search?: string; // ranked full-text search term (Linear app search ranking)
+  search?: string; // full-text search term
 }
 
 export interface IssueListResult {
@@ -420,13 +420,11 @@ interface IssueListPage {
  * via `pageInfo { hasNextPage endCursor }` and follows the cursor until
  * `limit` is satisfied or the server reports no more pages.
  *
- * When `filter.search` is set, Linear's ranked full-text search is used
- * instead (same ranking as the Linear app's search). We query `searchIssues`
- * rather than the `issueSearch` root field: both accept the same
- * `filter: IssueFilter` + `first`/`after` paging, but Linear marks
- * `issueSearch` as deprecated ("will be removed in the future — use
- * searchIssues instead"), and its nodes carry the same fields as `Issue` for
- * our selection set.
+ * When `filter.search` is set, the public `searchIssues` root field is used
+ * instead. Its current schema accepts `term`, `filter: IssueFilter`, and
+ * cursor pagination; its nodes support the same selection as `Issue`. We do
+ * not claim a particular ranking implementation or a deprecation status for
+ * the distinct `issueSearch` root field, which may evolve independently.
  *
  * There is no usable `totalCount` on the `issues` connection, so callers
  * compute the count line from the returned slice (`hasMore` in the result
