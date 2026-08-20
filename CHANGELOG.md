@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/apexcloudwise/linear-axi/compare/linear-axi-v0.1.2...linear-axi-v0.1.3) (2026-08-20)
+
+
+### Features
+
+* add read and discovery capabilities ([694a564](https://github.com/apexcloudwise/linear-axi/commit/694a56475489a7c18ccb4c96c7c1b5b790383d10))
+
 ## [0.1.2](https://github.com/apexcloudwise/linear-axi/compare/linear-axi-v0.1.1...linear-axi-v0.1.2) (2026-08-11)
 
 

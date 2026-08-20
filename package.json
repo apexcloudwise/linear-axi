@@ -1,6 +1,6 @@
 {
   "name": "@apexcloudwise/linear-axi",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "packageManager": "pnpm@11.1.1",
   "description": "AXI-compliant Linear CLI — token-efficient TOON output, contextual suggestions, idempotent mutations over the Linear GraphQL API",
   "type": "module",
