@@ -81,6 +81,45 @@ export const ISSUE_DETAIL_FIELDS = `
   updatedAt
 `;
 
+/**
+ * Append opt-in extra scalar keys (from `--fields`) to a base issue selection
+ * set. Returns the base string unchanged when no extras are requested, so the
+ * default GraphQL documents stay byte-identical without the flag (opt-in only).
+ */
+export function withExtraFields(base: string, extraKeys: string[]): string {
+  if (extraKeys.length === 0) return base;
+  return `${base}${extraKeys.map((k) => `\n  ${k}`).join('')}`;
+}
+
+/**
+ * Selection for the `projects` connection. We select `status { type }` rather
+ * than the deprecated `state` field (Project.state: "[DEPRECATED] Use
+ * project.status instead" per @linear/sdk): status.type is a ProjectStatusType
+ * enum yielding the same raw lowercase lifecycle values.
+ */
+export const PROJECT_LIST_FIELDS = `
+  id
+  name
+  status { type }
+  progress
+  lead { name }
+  targetDate
+`;
+
+/**
+ * Selection for cycle nodes. Only the fields the `cycles` command renders:
+ * number (per-team identifier), the date range, and progress. The team key is
+ * added by the caller when fetching the root `cycles` connection (cycles from
+ * all teams are mixed there and need attribution).
+ */
+export const CYCLE_LIST_FIELDS = `
+  id
+  number
+  startsAt
+  endsAt
+  progress
+`;
+
 export interface LinearIssue {
   id: string;
   identifier: string;
@@ -94,12 +133,55 @@ export interface LinearIssue {
   url?: string;
   createdAt?: string;
   updatedAt?: string;
+  // Opt-in extra fields, present only when selected via --fields. Shapes
+  // verified against the generated Issue type in @linear/sdk v90.0.0:
+  // estimate is Float|null, dueDate a TimelessDate serialized as YYYY-MM-DD
+  // (null when unset), archivedAt an ISO DateTime, branchName a String.
+  estimate?: number | null;
+  dueDate?: string | null;
+  archivedAt?: string | null;
+  branchName?: string;
 }
 
 export interface LinearTeam {
   id: string;
   key: string;
   name: string;
+}
+
+/**
+ * A Linear project as returned by PROJECT_LIST_FIELDS. `status.type` carries
+ * the lifecycle state (backlog, planned, started, paused, completed,
+ * canceled); `progress` is a float 0-1; `targetDate` is a TimelessDate
+ * serialized as YYYY-MM-DD (null when unset). Field shapes verified against
+ * the generated types in @linear/sdk (Project, ProjectStatus).
+ */
+export interface LinearProject {
+  id: string;
+  name: string;
+  status?: { type: string } | null;
+  progress?: number;
+  lead?: { name: string } | null;
+  targetDate?: string | null;
+}
+
+/**
+ * A Linear cycle as returned by CYCLE_LIST_FIELDS. Cycles are a team's
+ * time-boxed iterations: `number` is auto-incrementing and unique within its
+ * team (it restarts per team — cycle 42 of LIN and cycle 42 of ENG are
+ * different cycles); `progress` is a float 0-1 ("(completed estimate points +
+ * 0.25 * in-progress estimate points) / total estimate points", 0 when nothing
+ * is estimated); `startsAt`/`endsAt` are ISO DateTimes. Field shapes verified
+ * against the generated types in @linear/sdk (Cycle).
+ */
+export interface LinearCycle {
+  id: string;
+  number: number;
+  startsAt: string;
+  endsAt: string;
+  progress?: number;
+  /** Present when fetched via the root `cycles` connection (absent per-team). */
+  team?: { key: string } | null;
 }
 
 export interface LinearViewer {
@@ -128,16 +210,192 @@ export async function fetchTeams(apiKey: string): Promise<LinearTeam[]> {
   return data.teams.nodes;
 }
 
+export interface ProjectListResult {
+  projects: LinearProject[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more projects
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface ProjectListPage {
+  nodes: LinearProject[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List workspace projects, most recently updated first, auto-paginated in
+ * PAGE_SIZE (50) batches like fetchIssues until `limit` is satisfied or the
+ * server reports no more pages.
+ */
+export async function fetchProjects(
+  apiKey: string,
+  limit = 100,
+): Promise<ProjectListResult> {
+  const query = `query Projects($first: Int!, $after: String) {
+    projects(first: $first, after: $after, orderBy: updatedAt) {
+      nodes { ${PROJECT_LIST_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+  const projects: LinearProject[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (projects.length < limit) {
+    const first = Math.min(limit - projects.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{ projects: ProjectListPage }>(
+      apiKey,
+      query,
+      variables,
+    );
+
+    projects.push(...data.projects.nodes);
+
+    hasMore = data.projects.pageInfo?.hasNextPage ?? false;
+    const nextCursor = data.projects.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues: stop on server exhaustion and on a
+    // non-advancing cursor or empty page that would otherwise spin forever.
+    if (!hasMore || nextCursor === undefined) break;
+    if (data.projects.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { projects: projects.slice(0, limit), hasMore };
+}
+
+export interface CycleListResult {
+  cycles: LinearCycle[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more cycles
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface CycleListPage {
+  nodes: LinearCycle[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List recent cycles, most recently updated first, auto-paginated in PAGE_SIZE
+ * (50) batches like fetchProjects until `limit` is satisfied or the server
+ * reports no more pages.
+ *
+ * With `teamKey`, the team is resolved to its id (resolveTeamId) and its
+ * `team(id:) { cycles }` connection is queried. Without, the root `cycles`
+ * connection ("all cycles accessible to the user") is queried and each node
+ * also selects `team { key }` so mixed-team rows can be attributed — one
+ * request instead of one per team. Both connections take the same args
+ * (filter/first/after/orderBy: PaginationOrderBy) per @linear/sdk
+ * (TeamCyclesArgs, QueryCyclesArgs); PaginationOrderBy only offers
+ * createdAt/updatedAt, so updatedAt is the recent-first ordering, matching
+ * issues and projects.
+ *
+ * An unknown team key fails loud rather than silently returning nothing.
+ */
+export async function fetchCycles(
+  apiKey: string,
+  teamKey?: string,
+  limit = 10,
+): Promise<CycleListResult> {
+  let teamId: string | undefined;
+  if (teamKey !== undefined) {
+    teamId = await resolveTeamId(apiKey, teamKey);
+    if (!teamId) {
+      throw new AxiError(
+        `Team "${teamKey}" not found in your workspace`,
+        'VALIDATION_ERROR',
+        ['Run `linear-axi teams` to see available team keys'],
+      );
+    }
+  }
+
+  const perTeam = teamId !== undefined;
+  const query = perTeam
+    ? `query TeamCycles($id: String!, $first: Int!, $after: String) {
+        team(id: $id) {
+          cycles(first: $first, after: $after, orderBy: updatedAt) {
+            nodes { ${CYCLE_LIST_FIELDS} }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }`
+    : `query Cycles($first: Int!, $after: String) {
+        cycles(first: $first, after: $after, orderBy: updatedAt) {
+          nodes { ${CYCLE_LIST_FIELDS} team { key } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`;
+
+  const cycles: LinearCycle[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (cycles.length < limit) {
+    const first = Math.min(limit - cycles.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = perTeam
+      ? { id: teamId, first }
+      : { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{
+      team?: { cycles?: CycleListPage } | null;
+      cycles?: CycleListPage;
+    }>(apiKey, query, variables);
+
+    const conn = (perTeam ? data.team?.cycles : data.cycles) as CycleListPage;
+    cycles.push(...conn.nodes);
+
+    hasMore = conn.pageInfo?.hasNextPage ?? false;
+    const nextCursor = conn.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues/fetchProjects.
+    if (!hasMore || nextCursor === undefined) break;
+    if (conn.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { cycles: cycles.slice(0, limit), hasMore };
+}
+
 export interface IssueListFilter {
   team?: string; // team key, e.g. "LIN"
   stateType?: string; // backlog | unstarted | started | completed | canceled | triage
   assigneeEmail?: string; // exact email (use viewer email for "me")
   assigneeName?: string; // exact display name
-  label?: string; // label name (at least one match)
+  labels?: string[]; // label names — matches issues carrying ANY of them
+  project?: string; // project name — exact match
+  cycle?: 'current' | number; // 'current' = any team's active cycle; a number is per-team (compose with team)
+  search?: string; // full-text search term
 }
 
 export interface IssueListResult {
   issues: LinearIssue[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more results
+   * exist beyond the returned slice (e.g. the `--limit` was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+/** Linear caps connection pages at 50; fetchIssues auto-paginates in this size. */
+const PAGE_SIZE = 50;
+
+interface IssueListPage {
+  nodes: LinearIssue[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
 }
 
 /**
@@ -145,17 +403,43 @@ export interface IssueListResult {
  *
  * Filter syntax follows Linear's documented comparators, e.g.
  *   assignee: { email: { eq: "x" } }
- *   labels:   { name:  { eq: "Bug" } }
+ *   labels:   { some: { name: { in: ["Bug", "Regression"] } } }
  *   state:    { type:  { eq: "started" } }
  *   team:     { key:   { eq: "LIN" } }
+ *   project:  { name:  { eq: "Mobile app" } }
+ *   cycle:    { isActive: { eq: true } }   // the active cycle(s)
+ *   cycle:    { number:  { eq: 42 } }      // a per-team cycle number
  *
- * There is no `totalCount` on Linear connections, so callers compute the count
- * line from the returned slice (with a truncation hint when `limit` is hit).
+ * `labels` uses `some: { name: { in: [...] } }` — an issue matches when at
+ * least one of its labels is in the list ("any of" semantics). Shape verified
+ * against the generated schema types in @linear/sdk: IssueFilter.labels is an
+ * IssueLabelCollectionFilter whose `some` takes an IssueLabelFilter with a
+ * `name` StringComparator exposing `in`.
+ *
+ * Results are auto-paginated: each request fetches up to PAGE_SIZE (50) nodes
+ * via `pageInfo { hasNextPage endCursor }` and follows the cursor until
+ * `limit` is satisfied or the server reports no more pages.
+ *
+ * When `filter.search` is set, the public `searchIssues` root field is used
+ * instead. Its current schema accepts `term`, `filter: IssueFilter`, and
+ * cursor pagination; its nodes support the same selection as `Issue`. We do
+ * not claim a particular ranking implementation or a deprecation status for
+ * the distinct `issueSearch` root field, which may evolve independently.
+ *
+ * There is no usable `totalCount` on the `issues` connection, so callers
+ * compute the count line from the returned slice (`hasMore` in the result
+ * says whether a truncation hint is warranted).
+ *
+ * `extraFields` is a list of opt-in extra scalar Issue keys (from `--fields`)
+ * appended to the node selection; the default document is used when empty.
+ * It applies to both the `issues` and the `searchIssues` (filter.search)
+ * documents — both return Issue nodes.
  */
 export async function fetchIssues(
   apiKey: string,
   filter: IssueListFilter,
   limit = 50,
+  extraFields: string[] = [],
 ): Promise<IssueListResult> {
   const where: string[] = [];
 
@@ -171,40 +455,287 @@ export async function fetchIssues(
   if (filter.stateType) {
     where.push(`state: { type: { eq: ${jsonStr(filter.stateType)} } }`);
   }
-  if (filter.label) {
-    where.push(`labels: { name: { eq: ${jsonStr(filter.label)} } }`);
+  if (filter.project) {
+    where.push(`project: { name: { eq: ${jsonStr(filter.project)} } }`);
+  }
+  if (filter.labels?.length) {
+    where.push(`labels: { some: { name: { in: ${jsonStr(filter.labels)} } } }`);
+  }
+  if (filter.cycle !== undefined) {
+    // IssueFilter.cycle is a NullableCycleFilter (verified against the
+    // generated types in @linear/sdk): isActive is a BooleanComparator
+    // (eq/neq) and number is a NumberComparator with eq, so both shapes below
+    // are schema-valid — no cycle-id resolution round trip is needed.
+    where.push(
+      filter.cycle === 'current'
+        ? `cycle: { isActive: { eq: true } }`
+        : `cycle: { number: { eq: ${filter.cycle} } }`,
+    );
   }
 
   const filterPart = where.length ? `filter: { ${where.join(', ')} }, ` : '';
-  const query = `query Issues($first: Int!) {
-    issues(${filterPart}first: $first, orderBy: updatedAt) {
-      nodes { ${ISSUE_LIST_FIELDS} }
+  const isSearch = filter.search !== undefined;
+  const selection = withExtraFields(ISSUE_LIST_FIELDS, extraFields);
+
+  const query = isSearch
+    ? `query SearchIssues($term: String!, $first: Int!, $after: String) {
+        searchIssues(term: $term, ${filterPart}first: $first, after: $after) {
+          nodes { ${selection} }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`
+    : `query Issues($first: Int!, $after: String) {
+        issues(${filterPart}first: $first, after: $after, orderBy: updatedAt) {
+          nodes { ${selection} }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`;
+
+  const issues: LinearIssue[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  // Auto-paginate until `limit` is satisfied. Each page asks for only the
+  // remaining slots (capped at PAGE_SIZE) so we never over-fetch.
+  while (issues.length < limit) {
+    const first = Math.min(limit - issues.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = isSearch
+      ? { term: filter.search, first }
+      : { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
     }
-  }`;
 
-  const data = await linearRequest<{ issues: { nodes: LinearIssue[] } }>(
-    apiKey,
-    query,
-    { first: Math.min(limit, 50) },
-  );
+    const data = await linearRequest<{
+      issues?: IssueListPage;
+      searchIssues?: IssueListPage;
+    }>(apiKey, query, variables);
 
-  return { issues: data.issues.nodes };
+    const conn = (isSearch ? data.searchIssues : data.issues) as IssueListPage;
+    issues.push(...conn.nodes);
+
+    hasMore = conn.pageInfo?.hasNextPage ?? false;
+    const nextCursor = conn.pageInfo?.endCursor ?? undefined;
+
+    // Stop when the server says we are done, and guard against a server that
+    // keeps hasNextPage true without a usable (present, advancing) cursor or
+    // without nodes — both would loop forever.
+    if (!hasMore || nextCursor === undefined) break;
+    if (conn.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { issues: issues.slice(0, limit), hasMore };
 }
 
 /**
  * Fetch a single issue. Linear's `issue(id:)` accepts EITHER a UUID or the
  * human-readable identifier (e.g. "CTZ-311"), so no resolution step is needed.
+ *
+ * `extraFields` is a list of opt-in extra scalar Issue keys (from `--fields`)
+ * appended to the selection; the default document is used when empty.
  */
 export async function fetchIssue(
   apiKey: string,
   ref: string,
+  extraFields: string[] = [],
 ): Promise<LinearIssue | undefined> {
   const data = await linearRequest<{ issue: LinearIssue | null }>(
     apiKey,
-    `query Issue($id: String!) { issue(id: $id) { ${ISSUE_DETAIL_FIELDS} } }`,
+    `query Issue($id: String!) { issue(id: $id) { ${withExtraFields(ISSUE_DETAIL_FIELDS, extraFields)} } }`,
     { id: ref },
   );
   return data.issue ?? undefined;
+}
+
+/** Selection for comment nodes. The author is `user` for workspace comments,
+ * `externalUser` for comments created through integrations (Slack, Intercom). */
+export const COMMENT_LIST_FIELDS = `
+  id
+  body
+  user { name }
+  externalUser { displayName }
+  createdAt
+`;
+
+/**
+ * A Linear comment as returned by COMMENT_LIST_FIELDS. Exactly one of
+ * user/externalUser is set for real comments (Comment.user is nullable:
+ * "null for comments created by integrations or bots without a user
+ * association" per @linear/sdk); both are absent in fixtures only.
+ */
+export interface LinearComment {
+  id: string;
+  body: string;
+  user?: { name: string } | null;
+  externalUser?: { displayName: string } | null;
+  createdAt: string;
+}
+
+export interface CommentListResult {
+  comments: LinearComment[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more comments
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface CommentListPage {
+  nodes: LinearComment[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List one issue's comments, newest first.
+ *
+ * The root `comments` connection has no `issueId` argument in current
+ * @linear/sdk (v90.0.0 QueryCommentsArgs: after/before/filter/first/
+ * includeArchived/last/orderBy) — the thread is scoped through
+ * `filter: { issue: { id: { eq: ... } } }` (CommentFilter.issue is a
+ * NullableIssueFilter; IssueFilter.id is an IssueIdComparator with eq: ID).
+ *
+ * Ordering: PaginationOrderBy only offers createdAt/updatedAt and Linear's
+ * connections sort descending (newest first — Linear's pagination docs and
+ * the repo's fetchIssues/fetchProjects/fetchCycles precedent; the
+ * Ascending/Descending PaginationSortOrder enum in the SDK is not an arg on
+ * this connection). `orderBy: createdAt` therefore returns the newest
+ * comment first without any client-side reversing, and stays the stable
+ * thread order (an edited old comment does not jump to the top, which
+ * `updatedAt` ordering would cause).
+ *
+ * Auto-paginates in PAGE_SIZE (50) batches like fetchIssues until `limit` is
+ * satisfied or the server reports no more pages.
+ */
+export async function fetchComments(
+  apiKey: string,
+  issueId: string,
+  limit = 100,
+): Promise<CommentListResult> {
+  const query = `query Comments($issueId: ID!, $first: Int!, $after: String) {
+    comments(filter: { issue: { id: { eq: $issueId } } }, first: $first, after: $after, orderBy: createdAt) {
+      nodes { ${COMMENT_LIST_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+  const comments: LinearComment[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (comments.length < limit) {
+    const first = Math.min(limit - comments.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = { issueId, first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{ comments: CommentListPage }>(
+      apiKey,
+      query,
+      variables,
+    );
+
+    comments.push(...data.comments.nodes);
+
+    hasMore = data.comments.pageInfo?.hasNextPage ?? false;
+    const nextCursor = data.comments.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues/fetchProjects/fetchCycles.
+    if (!hasMore || nextCursor === undefined) break;
+    if (data.comments.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { comments: comments.slice(0, limit), hasMore };
+}
+
+/** Selection for label nodes. `color` is a raw HEX string (see LinearLabel). */
+export const LABEL_LIST_FIELDS = `
+  id
+  name
+  color
+`;
+
+/**
+ * A Linear issue label as returned by LABEL_LIST_FIELDS. Labels can be
+ * workspace-level or team-scoped; `color` is a HEX string like "#EB5757"
+ * ("The label's color as a HEX string (e.g., '#EB5757')" per the generated
+ * IssueLabel type in @linear/sdk, where color is a non-nullable String).
+ * Rendered raw — terminal color support varies, so no ANSI swatch is
+ * attempted.
+ */
+export interface LinearLabel {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface LabelListResult {
+  labels: LinearLabel[];
+  /**
+   * True when the last fetched page reported `hasNextPage` — more labels
+   * exist beyond the returned slice (the fetch limit was hit mid-cursor).
+   */
+  hasMore: boolean;
+}
+
+interface LabelListPage {
+  nodes: LinearLabel[];
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+}
+
+/**
+ * List the workspace's issue labels, most recently updated first,
+ * auto-paginated in PAGE_SIZE (50) batches like fetchProjects until `limit`
+ * is satisfied or the server reports no more pages. The root `issueLabels`
+ * connection takes the same after/filter/first/orderBy args as the other
+ * list connections (QueryIssueLabelsArgs in @linear/sdk); PaginationOrderBy
+ * only offers createdAt/updatedAt, so updatedAt is the recent-first
+ * ordering, matching issues, projects, and cycles. The default limit (500)
+ * is generous for real workspaces while still guarding a runaway cursor;
+ * `hasMore` in the result says whether truncation occurred.
+ */
+export async function fetchLabels(
+  apiKey: string,
+  limit = 500,
+): Promise<LabelListResult> {
+  const query = `query Labels($first: Int!, $after: String) {
+    issueLabels(first: $first, after: $after, orderBy: updatedAt) {
+      nodes { ${LABEL_LIST_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+  const labels: LinearLabel[] = [];
+  let cursor: string | undefined;
+  let hasMore = false;
+
+  while (labels.length < limit) {
+    const first = Math.min(limit - labels.length, PAGE_SIZE);
+    const variables: Record<string, unknown> = { first };
+    if (cursor !== undefined) {
+      variables['after'] = cursor;
+    }
+
+    const data = await linearRequest<{ issueLabels: LabelListPage }>(
+      apiKey,
+      query,
+      variables,
+    );
+
+    labels.push(...data.issueLabels.nodes);
+
+    hasMore = data.issueLabels.pageInfo?.hasNextPage ?? false;
+    const nextCursor = data.issueLabels.pageInfo?.endCursor ?? undefined;
+
+    // Same loop guards as fetchIssues/fetchProjects/fetchCycles/fetchComments.
+    if (!hasMore || nextCursor === undefined) break;
+    if (data.issueLabels.nodes.length === 0 || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+
+  return { labels: labels.slice(0, limit), hasMore };
 }
 
 // ---------------------------------------------------------------------------
@@ -397,15 +928,41 @@ export async function resolveTeamId(
   return data.teams.nodes[0]?.id;
 }
 
+/**
+ * Resolve a project name (exact match) to its id. Mirrors resolveTeamId;
+ * currently exercised by tests and reserved for v0.3 write-side project
+ * assignment (e.g. issue create --project). ProjectFilter.name is a
+ * StringComparator with `eq` (verified against @linear/sdk).
+ */
+export async function resolveProjectId(
+  apiKey: string,
+  name: string,
+): Promise<string | undefined> {
+  const data = await linearRequest<{
+    projects: { nodes: Array<{ id: string; name: string }> };
+  }>(
+    apiKey,
+    `query ProjectByName($name: String!) {
+      projects(filter: { name: { eq: $name } }) { nodes { id name } }
+    }`,
+    { name },
+  );
+  return data.projects.nodes[0]?.id;
+}
+
+/**
+ * Resolve label names to their ids, case-insensitively, in server order.
+ * Reuses fetchLabels (auto-paginated) so label resolution keeps working in
+ * workspaces with more than one page (50) of labels — the old inline query
+ * here fetched a single unpaginated page and silently missed the rest.
+ */
 async function resolveLabelIds(
   apiKey: string,
   names: string[],
 ): Promise<string[]> {
+  const { labels } = await fetchLabels(apiKey);
   const wanted = names.map((n) => n.trim().toLowerCase());
-  const data = await linearRequest<{
-    issueLabels: { nodes: Array<{ id: string; name: string }> };
-  }>(apiKey, `query Labels { issueLabels { nodes { id name } } }`);
-  return data.issueLabels.nodes
+  return labels
     .filter((l) => wanted.includes(l.name.toLowerCase()))
     .map((l) => l.id);
 }
@@ -446,6 +1003,6 @@ async function resolveStateIdByName(
   return match.id;
 }
 
-function jsonStr(value: string): string {
+function jsonStr(value: string | string[]): string {
   return JSON.stringify(value);
 }
