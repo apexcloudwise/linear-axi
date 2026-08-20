@@ -52,6 +52,18 @@ function nonJsonError(status: number): Response {
   } as Response;
 }
 
+/** A successful HTTP response whose body cannot be decoded as JSON. */
+function nonJsonSuccess(): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    json: async () => {
+      throw new SyntaxError('Unexpected token < in JSON');
+    },
+  } as Response;
+}
+
 /**
  * Stub global fetch to answer with `responses` in order (last one repeats).
  * Returns the mock for call/argument assertions.
@@ -122,6 +134,12 @@ describe('request shape', () => {
 });
 
 describe('HTTP status matrix (no GraphQL errors)', () => {
+  it('maps an invalid 200 response to a structured error', async () => {
+    const err = await requestError(nonJsonSuccess());
+    expectAxiError(err, 'UNKNOWN', 'Linear returned an invalid response');
+    expect(err.suggestions).toEqual(['Retry in a few seconds']);
+  });
+
   it('maps 400 to UNKNOWN with the status in the message', async () => {
     const err = await requestError(httpError(400, { errors: [] }));
     // errors: [] is an empty array — not GraphQL-level errors — so the plain

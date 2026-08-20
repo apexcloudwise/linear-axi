@@ -100,6 +100,16 @@ export async function linearRequest<T = unknown>(
     throw mapLinearError({ status: response.status, body });
   }
 
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    !Object.prototype.hasOwnProperty.call(body, 'data')
+  ) {
+    throw new AxiError('Linear returned an invalid response', 'UNKNOWN', [
+      'Retry in a few seconds',
+    ]);
+  }
+
   return (body as { data: T }).data;
 }
 
