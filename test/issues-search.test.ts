@@ -187,6 +187,10 @@ describe('issues command --search', () => {
     await expect(
       issuesCommand(['--search='], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/--search requires a value/);
+
+    await expect(
+      issuesCommand(['--search', '--team', 'LIN'], { apiKey: FAKE_KEY }),
+    ).rejects.toThrow(/--search requires a value/);
   });
 
   it('still rejects unknown flags alongside --search', async () => {

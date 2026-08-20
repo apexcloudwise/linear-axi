@@ -97,7 +97,10 @@ export async function issuesCommand(
   const labels = takeAllFlags(args, '--label');
   const hasSearch = args.some((a) => a === '--search' || a.startsWith('--search='));
   const search = takeFlag(args, '--search');
-  if (hasSearch && (search === undefined || search.trim() === '')) {
+  if (
+    hasSearch &&
+    (search === undefined || search.trim() === '' || search.startsWith('--'))
+  ) {
     // takeFlag returns undefined for a missing value; never silently drop a search.
     throw new AxiError('--search requires a value', 'VALIDATION_ERROR', [
       'e.g. --search "onboarding"',
