@@ -108,7 +108,10 @@ export async function issuesCommand(
   }
   const hasProject = args.some((a) => a === '--project' || a.startsWith('--project='));
   const project = takeFlag(args, '--project');
-  if (hasProject && (project === undefined || project.trim() === '')) {
+  if (
+    hasProject &&
+    (project === undefined || project.trim() === '' || project.startsWith('--'))
+  ) {
     // Same guard as --search: a missing value must fail loud, not drop the filter.
     throw new AxiError('--project requires a value', 'VALIDATION_ERROR', [
       'e.g. --project "Mobile app"',
@@ -116,7 +119,10 @@ export async function issuesCommand(
   }
   const hasCycle = args.some((a) => a === '--cycle' || a.startsWith('--cycle='));
   const cycle = takeFlag(args, '--cycle');
-  if (hasCycle && (cycle === undefined || cycle.trim() === '')) {
+  if (
+    hasCycle &&
+    (cycle === undefined || cycle.trim() === '' || cycle.startsWith('--'))
+  ) {
     throw new AxiError('--cycle requires a value', 'VALIDATION_ERROR', [
       'Use --cycle current for the active cycle, or --cycle <number> --team <KEY>',
     ]);

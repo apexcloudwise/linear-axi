@@ -194,6 +194,12 @@ describe('projects command', () => {
       projectsCommand(['--bogus'], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/unknown flag --bogus/);
   });
+
+  it('rejects positional arguments loudly', async () => {
+    await expect(projectsCommand(['extra'], { apiKey: FAKE_KEY })).rejects.toThrow(
+      /Unexpected argument: extra/,
+    );
+  });
 });
 
 describe('issues --project filter', () => {
@@ -257,6 +263,9 @@ describe('issues --project filter', () => {
 
     await expect(
       issuesCommand(['--project='], { apiKey: FAKE_KEY }),
+    ).rejects.toThrow(/--project requires a value/);
+    await expect(
+      issuesCommand(['--project', '--limit', '25'], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/--project requires a value/);
   });
 

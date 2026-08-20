@@ -79,7 +79,10 @@ export async function commentCommand(
   // literal first positional from the reserved set selects a subcommand, and
   // no Linear issue reference (TEAM-NUMBER like LIN-123, or a UUID) can
   // collide with those words, so existing invocations are unaffected.
-  const sub = getPositional(args, 0);
+  // Values for create/update body flags are positional-looking strings too.
+  // Skip them while dispatching so `comment --body list LIN-1` stays on the
+  // create path instead of being mistaken for `comment list ...`.
+  const sub = getDispatchPositional(args);
   if (sub === 'list') {
     return listComments(args.slice(1), ctx);
   }
@@ -90,6 +93,21 @@ export async function commentCommand(
     return deleteCommentCmd(args.slice(1), ctx);
   }
   return createCommentCmd(args, ctx);
+}
+
+function getDispatchPositional(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--body' || arg === '--body-file') {
+      i++;
+      continue;
+    }
+    if (arg.startsWith('--body=') || arg.startsWith('--body-file=')) {
+      continue;
+    }
+    if (!arg.startsWith('--')) return arg;
+  }
+  return undefined;
 }
 
 async function listComments(

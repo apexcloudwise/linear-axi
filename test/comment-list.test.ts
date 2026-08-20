@@ -134,6 +134,22 @@ describe('comment dispatch', () => {
     // The create path must not leak list output.
     expect(out).not.toContain('comments[0]');
   });
+
+  it('does not treat a --body value as a subcommand', async () => {
+    const { requests } = stubLinearFetch({ nodes: [] });
+
+    const out = await commentCommand(['--body', 'list', 'LIN-1'], {
+      apiKey: FAKE_KEY,
+    });
+
+    expect(requests[0].body.query).toContain('query Issue(');
+    expect(requests[1].body.query).toContain('mutation Comment(');
+    expect(requests[1].body.variables).toEqual({
+      issueId: 'ir-1',
+      body: 'list',
+    });
+    expect(out).toContain('comment: added to LIN-1');
+  });
 });
 
 describe('comment list document', () => {

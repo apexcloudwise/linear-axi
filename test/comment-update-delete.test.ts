@@ -328,6 +328,32 @@ describe('comment dispatch (backward compat + reserved words)', () => {
     expect(out).toContain('comment: added to LIN-1');
   });
 
+  it('does not treat a --body-file value as a subcommand', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'axi-comment-dispatch-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(tmpDir);
+      writeFileSync('update', 'Edited via file', 'utf-8');
+      const { requests } = stubLinearFetch({});
+
+      const out = await commentCommand(
+        ['--body-file', 'update', 'LIN-1'],
+        { apiKey: FAKE_KEY },
+      );
+
+      expect(requests[0].body.query).toContain('query Issue(');
+      expect(requests[1].body.query).toContain('mutation Comment(');
+      expect(requests[1].body.variables).toEqual({
+        issueId: 'ir-1',
+        body: 'Edited via file',
+      });
+      expect(out).toContain('comment: added to LIN-1');
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('documents the new subcommands and the reserved-words note', () => {
     expect(COMMENT_HELP).toContain('comment update <COMMENT-ID> --body');
     expect(COMMENT_HELP).toContain('comment delete <COMMENT-ID>');

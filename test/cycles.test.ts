@@ -354,6 +354,9 @@ describe('issues --cycle filter', () => {
     await expect(
       issuesCommand(['--cycle='], { apiKey: FAKE_KEY }),
     ).rejects.toThrow(/--cycle requires a value/);
+    await expect(
+      issuesCommand(['--cycle', '--limit', '25'], { apiKey: FAKE_KEY }),
+    ).rejects.toThrow(/--cycle requires a value/);
   });
 
   it('composes --cycle with --search in the searchIssues query', async () => {

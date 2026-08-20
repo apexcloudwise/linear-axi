@@ -30,9 +30,6 @@ function sleep(ms: number): Promise<void> {
  * defensive fallback for intermediaries that return HTTP 429. All values are
  * clamped to [1s, 60s], otherwise a bounded exponential fallback is used.
  *
- * mapLinearError derives RATE_LIMITED from the HTTP status alone, so HTTP 429
- * is the only retry signal here — a GraphQL-level error (HTTP 200 + `errors`)
- * is never rate-limit-typed by mapLinearError and is never retried.
  */
 function rateLimitRetryDelayMs(response: Response, retry: number): number {
   const resets = [
