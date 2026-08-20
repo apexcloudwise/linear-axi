@@ -104,7 +104,7 @@ describe('cycles command', () => {
     expect(requests[0].body.variables).toEqual({ first: 10 });
     expect(out).toContain('42'); // cycle number
     expect(out).toContain('LIN'); // team attribution
-    expect(out).toContain('active'); // now is between start and end
+    expect(out).toContain('42,LIN,active,'); // status is rendered in the row
     expect(out).toContain(`${start.slice(0, 10)}..${end.slice(0, 10)}`);
     expect(out).toContain('25'); // progress 0.25 rendered as integer percent
     expect(out).toContain('count: 1');
@@ -142,7 +142,7 @@ describe('cycles command', () => {
     expect(query).not.toContain('team { key }');
     expect(requests[1].body.variables).toEqual({ id: 'team-1', first: 10 });
     expect(out).toContain('42');
-    expect(out).toContain('active');
+    expect(out).toContain('42,active,');
     expect(out).toContain('count: 1');
   });
 

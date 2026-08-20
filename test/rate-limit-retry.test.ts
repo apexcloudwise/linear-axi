@@ -168,7 +168,8 @@ describe('documented Linear GraphQL rate limits', () => {
   });
 
   it('honors Linear’s documented request-reset header', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-20T00:00:00.000Z'));
     const fetchMock = stubSequencedFetch(
       linearRateLimitedResponse(Date.now() + 2_000),
       okResponse(VIEWER),

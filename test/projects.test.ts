@@ -180,6 +180,26 @@ describe('projects command', () => {
     expect(hasMore).toBe(false);
   });
 
+  it('renders the truncation count when the project limit is reached', async () => {
+    const projects = Array.from({ length: 50 }, (_, i) =>
+      projectNode({ id: `pr-${i}`, name: `Project ${i}` }),
+    );
+    let page = 0;
+    stubLinearFetch(() => {
+      page += 1;
+      return {
+        projects: {
+          nodes: projects,
+          pageInfo: { hasNextPage: true, endCursor: `cursor-${page}` },
+        },
+      };
+    });
+
+    const out = await projectsCommand([], { apiKey: FAKE_KEY });
+
+    expect(out).toContain('count: 100 (showing first 100)');
+  });
+
   it('documents state values and percent progress in --help', () => {
     expect(PROJECTS_HELP).toContain(
       'backlog, planned, started, paused, completed, canceled',
